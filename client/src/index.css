@@ -1,0 +1,115 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Global Reset & Theme ── */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 229, 255, 0.2) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: rgba(0, 229, 255, 0.2);
+  border-radius: 3px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 229, 255, 0.4);
+}
+
+::selection {
+  background: rgba(0, 229, 255, 0.3);
+  color: #fff;
+}
+
+body {
+  overflow: hidden;
+}
+
+/* ── Glow Utilities ── */
+@layer utilities {
+  .glow-border {
+    border: 1px solid rgba(0, 229, 255, 0.15);
+  }
+
+  .glow-border-active {
+    border: 1px solid rgba(0, 229, 255, 0.4);
+    box-shadow: 0 0 15px rgba(0, 229, 255, 0.15), inset 0 0 15px rgba(0, 229, 255, 0.05);
+  }
+
+  .text-glow-cyan {
+    text-shadow: 0 0 10px rgba(0, 229, 255, 0.5);
+  }
+
+  .text-glow-green {
+    text-shadow: 0 0 10px rgba(0, 255, 157, 0.5);
+  }
+
+  .text-glow-red {
+    text-shadow: 0 0 10px rgba(255, 46, 86, 0.5);
+  }
+
+  .bg-grid {
+    background-image:
+      linear-gradient(rgba(0, 229, 255, 0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0, 229, 255, 0.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+
+  .input-cyber {
+    @apply w-full bg-cyber-bg border border-cyber-border rounded-lg px-4 py-3 text-white placeholder-cyber-dim
+           focus:outline-none focus:border-cyber-cyan focus:shadow-glow-cyan transition-all duration-300;
+  }
+
+  .btn-cyber {
+    @apply px-6 py-3 bg-gradient-to-r from-cyber-cyan/20 to-cyber-cyan/10 border border-cyber-cyan/40
+           text-cyber-cyan font-semibold rounded-lg hover:from-cyber-cyan/30 hover:to-cyber-cyan/20
+           hover:shadow-glow-cyan active:scale-[0.98] transition-all duration-300 disabled:opacity-40
+           disabled:cursor-not-allowed disabled:hover:shadow-none;
+  }
+
+  .btn-danger {
+    @apply px-6 py-3 bg-gradient-to-r from-cyber-red/20 to-cyber-red/10 border border-cyber-red/40
+           text-cyber-red font-semibold rounded-lg hover:from-cyber-red/30 hover:to-cyber-red/20
+           hover:shadow-glow-red active:scale-[0.98] transition-all duration-300;
+  }
+
+  .status-pill {
+    @apply inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-medium tracking-wider;
+  }
+}
+
+/* ── Scanline animation for header decorations ── */
+@keyframes scanline {
+  0%   { transform: translateY(-100%); }
+  100% { transform: translateY(100vh); }
+}
+
+.scanline-overlay::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(transparent 50%, rgba(0, 229, 255, 0.02) 50%);
+  background-size: 100% 4px;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* ── Pulse animation for status dots ── */
+@keyframes statusPulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+
+.status-dot-pulse {
+  animation: statusPulse 2s ease-in-out infinite;
+}
