@@ -1,0 +1,29 @@
+# CyberAdapt ML — Python dependencies
+# Model Training & Inference
+pandas>=2.0.0
+numpy>=1.24.0
+scikit-learn>=1.2.0
+lightgbm>=4.0.0
+xgboost>=2.0.0
+joblib>=1.3.0
+
+# Streaming Drift Detection
+river>=0.21.0
+
+# Visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Data I/O
+pyarrow>=12.0.0
+
+# Inference API (exposes /predict endpoint for Node.js server)
+flask>=3.0.0
+flask-cors>=4.0.0
+
+# Notebooks
+jupyter>=1.0.0
+ipykernel>=6.0.0
+
+# Testing
+pytest>=7.3.0

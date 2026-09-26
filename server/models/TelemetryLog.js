@@ -2,6 +2,8 @@
    Model: TelemetryLog
    Each document represents a single network flow record
    ingested from an edge sensor (52-feature vector).
+   Threat classification labels are back-filled asynchronously
+   by the Python ML inference microservice after ingest.
    ────────────────────────────────────────────────────────────── */
 const mongoose = require('mongoose');
 
@@ -31,6 +33,25 @@ const telemetryLogSchema = new mongoose.Schema({
       message: 'features must contain exactly 52 numeric values',
     },
   },
+  /* ── ML Threat Classification (populated after ML inference) ── */
+  threatLabel: {
+    type: String,
+    default: null,
+    enum: [
+      null,
+      'Normal Traffic',
+      'DoS',
+      'DDoS',
+      'Port Scanning',
+      'Brute Force',
+      'Web Attacks',
+      'Bots',
+    ],
+  },
+  threatConfidence: {
+    type: Number,   // 0.0 – 1.0 probability score from the model
+    default: null,
+  },
   receivedAt: {
     type: Date,
     default: Date.now,
@@ -39,5 +60,8 @@ const telemetryLogSchema = new mongoose.Schema({
 
 /* Compound index for fast recent-flow queries per company */
 telemetryLogSchema.index({ companyId: 1, receivedAt: -1 });
+
+/* Index to efficiently retrieve all threat flows for a company */
+telemetryLogSchema.index({ companyId: 1, threatLabel: 1, receivedAt: -1 });
 
 module.exports = mongoose.model('TelemetryLog', telemetryLogSchema);
