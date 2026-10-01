@@ -10,19 +10,10 @@ import Register    from './pages/Register';
 import Overview    from './pages/Overview';
 import LiveTraffic from './pages/LiveTraffic';
 import SensorSetup from './pages/SensorSetup';
-
-/* ── Placeholder pages for nav items without full impl ── */
-function PlaceholderPage({ title }) {
-  return (
-    <div className="flex items-center justify-center h-full animate-fade-in">
-      <div className="text-center space-y-3">
-        <h2 className="text-lg font-bold tracking-[0.15em] text-white uppercase">{title}</h2>
-        <p className="text-sm text-cyber-dim font-mono">Module under development</p>
-        <div className="w-24 h-1 mx-auto bg-gradient-to-r from-transparent via-cyber-cyan/40 to-transparent rounded-full" />
-      </div>
-    </div>
-  );
-}
+import ConceptDrift from './pages/ConceptDrift';
+import Adaptation   from './pages/Adaptation';
+import Explainability from './pages/Explainability';
+import Evaluation   from './pages/Evaluation';
 
 /* ── Auth Guard ── */
 function ProtectedRoute() {
@@ -81,11 +72,12 @@ export default function App() {
             <Route path="/"              element={<Overview />} />
             <Route path="/live-traffic"  element={<LiveTraffic />} />
             <Route path="/sensor-setup"  element={<SensorSetup />} />
-            <Route path="/concept-drift" element={<PlaceholderPage title="Concept Drift Detection" />} />
-            <Route path="/adaptation"    element={<PlaceholderPage title="Model Adaptation" />} />
-            <Route path="/explain"       element={<PlaceholderPage title="Explainability Engine" />} />
-            <Route path="/evaluation"    element={<PlaceholderPage title="Model Evaluation" />} />
+            <Route path="/concept-drift" element={<ConceptDrift />} />
+            <Route path="/adaptation"    element={<Adaptation />} />
+            <Route path="/explain"       element={<Explainability />} />
+            <Route path="/evaluation"    element={<Evaluation />} />
           </Route>
+
 
           {/* Catch-all */}
           <Route path="*" element={<Navigate to="/" replace />} />

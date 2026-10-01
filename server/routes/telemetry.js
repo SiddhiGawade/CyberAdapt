@@ -15,7 +15,7 @@ const FEATURE_COUNT     = 52;
 const FLOW_DURATION_IDX = 1;   // index of flow-duration in the 52-feature vector
 
 /* ── ML Inference microservice URL (set ML_API_URL in .env) ── */
-const ML_API_URL = (process.env.ML_API_URL || 'http://localhost:6000').replace(/\/$/, '');
+const ML_API_URL = (process.env.ML_API_URL || 'http://127.0.0.1:5001').replace(/\/$/, '');
 
 /**
  * Fire-and-forget: forward a batch of validated flows to the Python ML API,
@@ -57,7 +57,7 @@ async function classifyAndAnnotate(flowDocs) {
       .filter((doc) => predMap[doc.flowId])
       .map((doc) => ({
         updateOne: {
-          filter: { flowId: doc.flowId, sensorId: doc.sensorId },
+          filter: { _id: doc._id },
           update: {
             $set: {
               threatLabel:      predMap[doc.flowId].label,
@@ -70,6 +70,7 @@ async function classifyAndAnnotate(flowDocs) {
     if (bulkOps.length > 0) {
       await TelemetryLog.bulkWrite(bulkOps, { ordered: false });
     }
+
   } catch (err) {
     // Non-fatal: ML annotation failure must never crash the ingestion path
     if (err.name !== 'AbortError') {
@@ -147,7 +148,8 @@ router.post('/ingest', authenticateSensor, async (req, res, next) => {
     });
 
     /* Fire-and-forget ML classification (does NOT await) */
-    classifyAndAnnotate(valid).catch(() => {});
+    classifyAndAnnotate(inserted).catch(() => {});
+
 
   } catch (err) {
     next(err);
@@ -159,7 +161,7 @@ router.get('/recent-flows', auth, async (req, res, next) => {
   try {
     const flows = await TelemetryLog.find({ companyId: req.user.id })
       .sort({ receivedAt: -1 })
-      .limit(20)
+      .limit(100)
       .lean();
 
     return res.json({ flows });
@@ -197,4 +199,61 @@ router.get('/model-info', auth, async (req, res, next) => {
   }
 });
 
+/* GET /api/telemetry/concept-drift */
+router.get('/concept-drift', auth, async (req, res, next) => {
+  try {
+    const ctrl    = new AbortController();
+    const timeout = setTimeout(() => ctrl.abort(), 3000);
+    const resp    = await fetch(`${ML_API_URL}/concept-drift`, { signal: ctrl.signal });
+    clearTimeout(timeout);
+    const data    = await resp.json();
+    return res.status(resp.ok ? 200 : 503).json(data);
+  } catch (err) {
+    return res.status(503).json({ error: err.message });
+  }
+});
+
+/* GET /api/telemetry/adaptation */
+router.get('/adaptation', auth, async (req, res, next) => {
+  try {
+    const ctrl    = new AbortController();
+    const timeout = setTimeout(() => ctrl.abort(), 3000);
+    const resp    = await fetch(`${ML_API_URL}/adaptation`, { signal: ctrl.signal });
+    clearTimeout(timeout);
+    const data    = await resp.json();
+    return res.status(resp.ok ? 200 : 503).json(data);
+  } catch (err) {
+    return res.status(503).json({ error: err.message });
+  }
+});
+
+/* GET /api/telemetry/explain */
+router.get('/explain', auth, async (req, res, next) => {
+  try {
+    const ctrl    = new AbortController();
+    const timeout = setTimeout(() => ctrl.abort(), 3000);
+    const resp    = await fetch(`${ML_API_URL}/explain`, { signal: ctrl.signal });
+    clearTimeout(timeout);
+    const data    = await resp.json();
+    return res.status(resp.ok ? 200 : 503).json(data);
+  } catch (err) {
+    return res.status(503).json({ error: err.message });
+  }
+});
+
+/* GET /api/telemetry/evaluation */
+router.get('/evaluation', auth, async (req, res, next) => {
+  try {
+    const ctrl    = new AbortController();
+    const timeout = setTimeout(() => ctrl.abort(), 3000);
+    const resp    = await fetch(`${ML_API_URL}/evaluation`, { signal: ctrl.signal });
+    clearTimeout(timeout);
+    const data    = await resp.json();
+    return res.status(resp.ok ? 200 : 503).json(data);
+  } catch (err) {
+    return res.status(503).json({ error: err.message });
+  }
+});
+
 module.exports = router;
+

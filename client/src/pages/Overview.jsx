@@ -2,15 +2,17 @@
    Page: Overview (Dashboard)
    ────────────────────────────────────────────────────────────── */
 import { useState, useEffect } from 'react';
-import { Shield, Activity, Cpu, Key, TrendingUp } from 'lucide-react';
+import { Shield, Activity, Cpu, TrendingUp } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import GlowCard from '../components/GlowCard';
 import LiveTrafficTable from '../components/LiveTrafficTable';
+import AttackAlertBanner from '../components/AttackAlertBanner';
 import api from '../api';
 
 export default function Overview() {
   const { user } = useAuth();
   const [stats, setStats] = useState({ keys: 0, flows: 0, lastIngest: null });
+  const [recentFlows, setRecentFlows] = useState([]);
 
   useEffect(() => {
     async function load() {
@@ -20,14 +22,16 @@ export default function Overview() {
           api.get('/telemetry/recent-flows'),
         ]);
         const activeKeys = (keysRes.keys || []).filter((k) => k.isActive);
+        const fetchedFlows = flowsRes.flows || [];
         const lastIngest = activeKeys.reduce((max, k) => {
           const t = k.lastIngestAt ? new Date(k.lastIngestAt).getTime() : 0;
           return t > max ? t : max;
         }, 0);
 
+        setRecentFlows(fetchedFlows);
         setStats({
           keys: activeKeys.length,
-          flows: (flowsRes.flows || []).length,
+          flows: fetchedFlows.length,
           lastIngest: lastIngest ? new Date(lastIngest) : null,
         });
       } catch {
@@ -35,7 +39,7 @@ export default function Overview() {
       }
     }
     load();
-    const id = setInterval(load, 10000);
+    const id = setInterval(load, 3000);
     return () => clearInterval(id);
   }, []);
 
@@ -80,9 +84,12 @@ export default function Overview() {
           Operations Overview
         </h1>
         <p className="text-sm text-cyber-text mt-1">
-          Real-time system status for <span className="text-cyber-cyan font-mono">{user?.domain}</span>
+          Real-time system status & Labrooms ML threat detection for <span className="text-cyber-cyan font-mono">{user?.domain}</span>
         </p>
       </div>
+
+      {/* Critical Attack Alert Banner */}
+      <AttackAlertBanner flows={recentFlows} />
 
       {/* KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
