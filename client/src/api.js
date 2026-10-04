@@ -32,6 +32,27 @@ async function request(endpoint, options = {}) {
 export const api = {
   get:  (url) => request(url),
   post: (url, body) => request(url, { method: 'POST', body: JSON.stringify(body) }),
+
+  /* Same JWT-authed POST as post(), but resolves { status, ok, data } for
+     EVERY HTTP response instead of throwing on !res.ok — lets callers read
+     the real status code (e.g. 202 vs 409 vs 422 on /adaptation/trigger)
+     without try/catch. Only transport-level failures (no response) reject. */
+  postWithStatus: async (url, body) => {
+    const token = localStorage.getItem('ca_token');
+
+    const res = await fetch(`${API_BASE}${url}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+
+    const data = await res.json().catch(() => ({}));
+
+    return { status: res.status, ok: res.ok, data };
+  },
 };
 
 export default api;

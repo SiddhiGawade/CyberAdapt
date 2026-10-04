@@ -255,5 +255,44 @@ router.get('/evaluation', auth, async (req, res, next) => {
   }
 });
 
+/* ──────────────── ML ACTION PROXIES (Dashboard) ─────────────── */
+/* POST /api/telemetry/adaptation/trigger — manual retrain trigger.
+   Status passthrough: UI distinguishes 202 accepted / 409 busy / 422. */
+router.post('/adaptation/trigger', auth, async (req, res, next) => {
+  try {
+    const ctrl    = new AbortController();
+    const timeout = setTimeout(() => ctrl.abort(), 5000);
+    const resp    = await fetch(`${ML_API_URL}/adaptation/trigger`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal:  ctrl.signal,
+    });
+    clearTimeout(timeout);
+    const data    = await resp.json();
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(503).json({ error: err.message });
+  }
+});
+
+/* POST /api/telemetry/admin/reset — demo reset (Flask enforces DEMO_MODE=1).
+   Status passthrough: UI distinguishes 200 reset / 403 forbidden. */
+router.post('/admin/reset', auth, async (req, res, next) => {
+  try {
+    const ctrl    = new AbortController();
+    const timeout = setTimeout(() => ctrl.abort(), 5000);
+    const resp    = await fetch(`${ML_API_URL}/admin/reset`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal:  ctrl.signal,
+    });
+    clearTimeout(timeout);
+    const data    = await resp.json();
+    return res.status(resp.status).json(data);
+  } catch (err) {
+    return res.status(503).json({ error: err.message });
+  }
+});
+
 module.exports = router;
 

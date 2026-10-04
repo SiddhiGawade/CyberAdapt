@@ -5,20 +5,26 @@ Lightweight Flask microservice that loads the trained champion model
 and exposes REST endpoints for the Node.js server to call.
 
 Endpoints:
-  GET  /health          — liveness probe
-  POST /predict         — classify a batch of 52-feature flow vectors
-  GET  /model-info      — active model metadata
+  GET  /health              — liveness probe
+  POST /predict             — classify a batch of 52-feature flow vectors
+  GET  /model-info          — active model metadata (+ champion version)
+  GET  /concept-drift       — live drift monitor state
+  GET  /adaptation          — live adapter state (buffer, version, history)
+  POST /adaptation/trigger  — manual candidate retrain (202/409/422)
+  GET  /evaluation          — live rolling metrics + pre/post adaptation split
+  POST /admin/reset         — demo reset (requires DEMO_MODE=1)
 
 Environment Variables:
   MODEL_PATH        — path to joblib champion model (default: ml/artifacts/champion_model.joblib)
   PREPROCESSOR_PATH — path to joblib preprocessor (default: ml/artifacts/preprocessor.joblib)
-  PORT              — API port (default: 6000)
+  PORT              — API port (default: 5001)
 
 Usage:
   cd /path/to/CyberAdapt
   python -m ml.api
 """
 
+import json
 import logging
 import os
 import sys
@@ -40,6 +46,9 @@ from ml.src.features.feature_contract import (
     LABROOMS_DEPLOYMENT_FEATURES,
     TARGET_CLASSES,
 )
+from ml.src.drift.live_monitor import LiveDriftMonitor, set_default_monitor
+from ml.src.adaptation.live_adapter import LiveAdapter
+from ml.src.evaluation.live_evaluator import LiveEvaluator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -78,12 +87,45 @@ LABROOMS_SLOT_MAP: Dict[int, str] = {
 
 # ── Model Loading ────────────────────────────────────────────────────────────
 
+def _resolve_boot_artifacts() -> Tuple[Path, Path]:
+    """Pick the (model_path, preprocessor_path) to load at boot / reset.
+
+    Order (TASK-09): the last promoted adaptive champion recorded in
+    ``active_model.json`` → ``MODEL_PATH``/``PREPROCESSOR_PATH`` env vars →
+    built-in defaults. ``POST /admin/reset`` deletes ``active_model.json``
+    before calling ``_load_artifacts`` so the originals come back.
+    """
+    try:
+        active_file = STATE_DIR / "active_model.json"
+        if active_file.exists():
+            info = json.loads(active_file.read_text(encoding="utf-8"))
+            mp, pp = info.get("model_path"), info.get("preprocessor_path")
+            if isinstance(mp, str) and isinstance(pp, str):
+                am, ap = Path(mp), Path(pp)
+                if am.is_file() and ap.is_file():
+                    logger.info(
+                        f"Boot-restoring promoted champion "
+                        f"{info.get('version')} via {active_file.name} → {am}"
+                    )
+                    return am, ap
+            logger.warning(
+                f"{active_file.name} present but its artifacts are missing or "
+                "malformed — falling back to env/default paths"
+            )
+    except Exception as exc:
+        logger.warning(f"Could not parse active_model.json ({exc}) — env/default paths")
+
+    return (
+        Path(os.environ.get("MODEL_PATH", DEFAULT_MODEL_PATH)),
+        Path(os.environ.get("PREPROCESSOR_PATH", DEFAULT_PREPROCESSOR_PATH)),
+    )
+
+
 def _load_artifacts() -> bool:
     """Load champion model and preprocessor from disk. Returns True if successful."""
     global _champion_model, _preprocessor, _model_loaded_at, _model_path_used
 
-    model_path = Path(os.environ.get("MODEL_PATH", DEFAULT_MODEL_PATH))
-    preproc_path = Path(os.environ.get("PREPROCESSOR_PATH", DEFAULT_PREPROCESSOR_PATH))
+    model_path, preproc_path = _resolve_boot_artifacts()
 
     if not model_path.exists():
         logger.warning(
@@ -113,6 +155,63 @@ def _extract_labrooms_features(raw_features: List[float]) -> Dict[str, float]:
     return {name: float(raw_features[idx]) for idx, name in LABROOMS_SLOT_MAP.items()}
 
 
+# ── Live drift monitoring (TASK-08) ───────────────────────────────────────────
+# §5.2 runtime state lives under ml/artifacts/state/ (gitignored). The monitor
+# restores counters/events/latch from drift_state.json on boot.
+STATE_DIR = ARTIFACTS_DIR / "state"
+try:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+except OSError as exc:  # non-fatal — LiveDriftMonitor re-mkdirs on persist
+    logger.warning(f"Could not create drift state dir {STATE_DIR}: {exc}")
+
+_drift_monitor = LiveDriftMonitor(STATE_DIR / "drift_state.json")
+set_default_monitor(_drift_monitor)  # keep module-level detect_drift() on this instance
+
+
+# ── Live model adaptation (TASK-09) ──────────────────────────────────────────
+# One api-owned LiveAdapter sharing STATE_DIR; every runtime dependency is an
+# injected callable per §9.3 (see ml/src/adaptation/live_adapter.py docstring).
+def _get_champion() -> Tuple[Any, Any]:
+    """() -> (model, preprocessor) — the current serving pair."""
+    return _champion_model, _preprocessor
+
+
+def _set_champion(model: Any, preprocessor: Any, version: str) -> None:
+    """Hot-swap hook — the adapter calls this on promotion (inside its retrain
+    thread). Reassigns the serving globals and bumps the truth fields so
+    /health, /model-info and /adaptation all report the new champion."""
+    global _champion_model, _preprocessor, _model_loaded_at, _model_path_used
+    _champion_model = model
+    _preprocessor = preprocessor
+    _model_loaded_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    try:
+        # The adapter writes active_model.json immediately before invoking
+        # this hook — read the real on-disk path for /model-info.
+        info = json.loads((STATE_DIR / "active_model.json").read_text(encoding="utf-8"))
+        mp = info.get("model_path")
+        _model_path_used = str(mp) if mp else f"adaptive_champion_{version} (in-memory)"
+    except Exception:
+        _model_path_used = f"adaptive_champion_{version} (in-memory)"
+    logger.info(f"Champion hot-swapped to {version} — model_path={_model_path_used}")
+
+
+_adapter = LiveAdapter(
+    state_dir=STATE_DIR,
+    get_champion=_get_champion,
+    set_champion=_set_champion,
+    extract_features=_extract_labrooms_features,
+    consume_drift_event=_drift_monitor.consume_drift_event,
+    reset_drift_reference=_drift_monitor.reset_reference,
+)
+
+
+# ── Live evaluation (TASK-10) ─────────────────────────────────────────────────
+# Rolling pseudo-labeled metrics over the same §9.1 batch_records (§5.4 label
+# rule applied inside the evaluator). Restores eval_window.jsonl on boot;
+# pre/post split reads the adapter's sibling adaptation_history.json.
+_evaluator = LiveEvaluator(STATE_DIR / "eval_window.jsonl")
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -135,6 +234,7 @@ def model_info():
         "model_type": type(_champion_model).__name__,
         "model_path": _model_path_used,
         "loaded_at": _model_loaded_at,
+        "version": _adapter.champion_version,
         "target_classes": TARGET_CLASSES,
         "feature_schema": "labrooms-app-layer-v1",
         "active_features": LABROOMS_DEPLOYMENT_FEATURES,
@@ -243,7 +343,16 @@ def predict():
     latency_ms = round((time.perf_counter() - t_start) * 1000, 3)
 
     predictions: List[Dict[str, Any]] = []
+    # §9.1 batch_record list — the shared payload fed to the drift monitor (T08),
+    # and reused by the adapter (T09) and evaluator (T10) inside the guarded
+    # block below.
+    batch_records: List[Dict[str, Any]] = []
     for i, (fid, label_idx, raw_vec) in enumerate(zip(flow_ids, y_pred, raw_vectors)):
+        # Model's raw output BEFORE any rule override (stored for pseudo-error
+        # and pseudo-label consumers downstream).
+        model_raw_index = int(label_idx)
+        model_raw_label = TARGET_CLASSES[model_raw_index] if model_raw_index < len(TARGET_CLASSES) else "Unknown"
+
         # Check rule-based application-layer anomaly override for Labrooms traffic
         app_anomaly = _detect_labrooms_app_layer_anomaly(raw_vec)
 
@@ -259,7 +368,9 @@ def predict():
             })
         else:
             label = TARGET_CLASSES[int(label_idx)] if int(label_idx) < len(TARGET_CLASSES) else "Unknown"
+            idx_val = int(label_idx)
             confidence = float(y_prob[i][int(label_idx)]) if (y_prob is not None and int(label_idx) < len(y_prob[i])) else None
+            conf_val = confidence
             probs = None
             if y_prob is not None:
                 probs = {}
@@ -276,59 +387,111 @@ def predict():
                 "probabilities": probs,
             })
 
+        batch_records.append({
+            "flow_id": fid,                    # as received (may carry LBL:: tag)
+            "raw_features": raw_vec,           # the raw 52-slot vector
+            "label": label,                    # FINAL label, post rule-override
+            "label_index": idx_val,
+            "confidence": conf_val,            # may be None if no predict_proba
+            "rule_override": app_anomaly is not None,
+            "model_raw_label": model_raw_label,
+            "model_raw_index": model_raw_index,
+        })
+
     response: Dict[str, Any] = {"predictions": predictions, "latency_ms": latency_ms}
     if parse_errors:
         response["rejected"] = parse_errors
+
+    # Feed the live drift monitor + adapter + evaluator (§9.5 wiring order:
+    # monitor → adapter.observe → adapter.maybe_trigger → evaluator.record).
+    # Guarded: drift/adaptation/evaluation must NEVER break /predict.
+    try:
+        _drift_monitor.process_batch(batch_records)
+        _adapter.observe(batch_records)
+        _adapter.maybe_trigger()
+        _evaluator.record(batch_records, latency_ms)
+    except Exception:
+        logger.exception("Drift monitor/adapter/evaluator processing failed — /predict unaffected")
+
     return jsonify(response)
 
 
 
 @app.get("/concept-drift")
 def concept_drift():
-    """Return streaming concept drift detection metrics (ADWIN, DDM, Page-Hinkley, Kolmogorov-Smirnov)."""
-    return jsonify({
-        "status": "active",
-        "drift_detected": False,
-        "detector_algorithms": {
-            "ADWIN": {"status": "stable", "p_value": 0.384, "threshold": 0.05, "drift_signal": False},
-            "DDM": {"status": "stable", "error_rate": 0.021, "warning_level": 0.05, "drift_signal": False},
-            "PageHinkley": {"status": "nominal", "sum_val": 1.42, "threshold": 50.0, "drift_signal": False},
-            "KS_Test": {"status": "stable", "stat": 0.042, "p_value": 0.612, "drift_signal": False},
-        },
-        "labrooms_features_drift": [
-            {"slot": 1, "name": "Flow Duration", "drift": "0.012", "status": "stable"},
-            {"slot": 4, "name": "Total Fwd Bytes (Request Size)", "drift": "0.018", "status": "stable"},
-            {"slot": 5, "name": "Total Bwd Bytes (Response Size)", "drift": "0.045", "status": "minor_shift"},
-            {"slot": 14, "name": "Flow Bytes/s (Throughput)", "drift": "0.028", "status": "stable"},
-            {"slot": 44, "name": "HTTP Status Code (SYN Slot)", "drift": "0.005", "status": "stable"},
-        ],
-        "samples_processed_since_retrain": 14250,
-        "last_drift_timestamp": "2026-10-01T14:22:10Z",
-    })
+    """Return live streaming concept drift state (§8 contract — LiveDriftMonitor)."""
+    return jsonify(_drift_monitor.get_status())
 
 
 @app.get("/adaptation")
 def adaptation():
-    """Return model adaptation metrics, ensemble weighting, and online learning status."""
-    return jsonify({
-        "champion_model": "WeightedSoftVotingEnsemble",
-        "adaptation_mode": "Streaming Incremental Ensemble Weighting",
-        "active_weights": {
-            "RandomForestClassifier": 0.45,
-            "ExtraTreesClassifier": 0.35,
-            "GradientBoostingClassifier": 0.20,
-        },
-        "retraining_history": [
-            {"version": "v1.4", "timestamp": "2026-10-01T19:08:14Z", "f1_score": 0.984, "trigger": "Manual Execution (Notebook 02)"},
-            {"version": "v1.3", "timestamp": "2026-09-28T10:15:00Z", "f1_score": 0.978, "trigger": "ADWIN Drift Alert"},
-            {"version": "v1.2", "timestamp": "2026-09-25T08:30:00Z", "f1_score": 0.971, "trigger": "Scheduled Batch Retrain"},
-        ],
-        "online_learning_buffer": {
-            "capacity": 5000,
-            "current_size": 1420,
-            "fill_percentage": 28.4,
-        },
-    })
+    """Return live adaptation state (§8 contract — LiveAdapter)."""
+    status = _adapter.get_status()
+    # Prefer api's own load/swap timestamp so /health + /model-info agree.
+    if _model_loaded_at:
+        status["model_loaded_at"] = _model_loaded_at
+    return jsonify(status)
+
+
+@app.post("/adaptation/trigger")
+def adaptation_trigger():
+    """Manual candidate-retrain trigger (§8) → 202 accepted / 409 busy /
+    422 insufficient buffer."""
+    result = _adapter.trigger("manual_dashboard")
+    code = {"accepted": 202, "busy": 409}.get(result.get("status"), 422)
+    return jsonify(result), code
+
+
+@app.post("/admin/reset")
+def admin_reset():
+    """Demo reset (§8) — requires env DEMO_MODE=1, else 403.
+
+    Deletes ``active_model.json``, resets the drift monitor + adapter, then
+    reloads the ORIGINAL ``MODEL_PATH``/``PREPROCESSOR_PATH`` artifacts via
+    ``_load_artifacts`` (with the pointer file gone it falls back to
+    env → defaults).
+    """
+    if os.environ.get("DEMO_MODE", "0") != "1":
+        return jsonify({"error": "Forbidden — requires DEMO_MODE=1"}), 403
+
+    cleared: List[str] = []
+
+    # 1. Drop the promoted-champion pointer FIRST so the reload below picks
+    #    up the original env/default artifacts.
+    try:
+        active_file = STATE_DIR / "active_model.json"
+        if active_file.exists():
+            active_file.unlink()
+            cleared.append("active_model")
+    except OSError as exc:
+        logger.warning(f"admin/reset: could not delete active_model.json: {exc}")
+
+    # 2. Reset the live state holders (failures logged, reset continues).
+    try:
+        _drift_monitor.reset()
+        cleared.append("drift_state")
+    except Exception:
+        logger.exception("admin/reset: drift monitor reset failed")
+    try:
+        _adapter.reset()
+        cleared.extend(["buffer", "history"])
+    except Exception:
+        logger.exception("admin/reset: adapter reset failed")
+
+    # 3. Reload the ORIGINAL champion artifacts (env vars → defaults).
+    if _load_artifacts():
+        cleared.append("model_artifacts")
+    else:
+        logger.error("admin/reset: original artifact reload failed — API degraded")
+
+    # 4. TASK-10: clear the live evaluation window.
+    try:
+        _evaluator.reset()
+        cleared.append("eval_window")
+    except Exception:
+        logger.exception("admin/reset: evaluator reset failed")
+
+    return jsonify({"status": "reset", "cleared": cleared}), 200
 
 
 @app.get("/explain")
@@ -362,37 +525,13 @@ def explain():
 
 @app.get("/evaluation")
 def evaluation():
-    """Return model evaluation metrics, confusion matrix, and class performance."""
-    return jsonify({
-        "dataset": "Labrooms Application-Layer (10 Populated Features)",
-        "overall_metrics": {
-            "accuracy": 0.987,
-            "precision_macro": 0.981,
-            "recall_macro": 0.979,
-            "f1_macro": 0.980,
-            "roc_auc": 0.995,
-            "latency_p95_ms": 3.4,
-        },
-        "per_class_metrics": {
-            "Normal Traffic": {"precision": 0.994, "recall": 0.996, "f1": 0.995},
-            "DoS": {"precision": 0.978, "recall": 0.972, "f1": 0.975},
-            "DDoS": {"precision": 0.989, "recall": 0.985, "f1": 0.987},
-            "Port Scanning": {"precision": 0.965, "recall": 0.970, "f1": 0.967},
-            "Brute Force": {"precision": 0.971, "recall": 0.968, "f1": 0.969},
-            "Web Attacks": {"precision": 0.962, "recall": 0.958, "f1": 0.960},
-            "Bots": {"precision": 0.980, "recall": 0.975, "f1": 0.977},
-        },
-        "confusion_matrix": [
-            [4850, 12, 5, 8, 10, 8, 7],
-            [15, 1420, 10, 5, 0, 0, 0],
-            [8, 12, 1850, 0, 0, 0, 0],
-            [10, 4, 0, 920, 6, 0, 0],
-            [12, 0, 0, 5, 640, 3, 0],
-            [9, 0, 0, 0, 4, 380, 2],
-            [6, 0, 0, 0, 0, 2, 290],
-        ],
-        "class_names": ["Normal Traffic", "DoS", "DDoS", "Port Scanning", "Brute Force", "Web Attacks", "Bots"],
-    })
+    """Return live rolling evaluation metrics (§8 contract — LiveEvaluator).
+
+    Pseudo-labeled rows from the rolling eval_window; <30 labeled samples →
+    ``insufficient_data: true`` + zeroed skeleton; ``pre_post_adaptation``
+    splits on the last promotion in ``adaptation_history.json``.
+    """
+    return jsonify(_evaluator.get_metrics())
 
 
 

@@ -6,6 +6,7 @@ ml/data/
 ml/artifacts/*.joblib
 ml/artifacts/*.pkl
 ml/artifacts/*.json
+ml/artifacts/state/
 ml/reports/figures/
 # keep the placeholder files
 !ml/artifacts/.gitkeep
