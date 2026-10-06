@@ -70,18 +70,34 @@ ARTIFACTS_DIR = Path(__file__).parent / "artifacts"
 DEFAULT_MODEL_PATH = ARTIFACTS_DIR / "champion_model.joblib"
 DEFAULT_PREPROCESSOR_PATH = ARTIFACTS_DIR / "preprocessor.joblib"
 
-# Labrooms sensor slot → CICIDS2017 feature name mapping
-# (populated indices only; all others are always 0 in Labrooms traffic)
-LABROOMS_SLOT_MAP: Dict[int, str] = {
-    1:  "Flow Duration",
-    2:  "Total Fwd Packets",
-    3:  "Bwd Packet Length Max",           # proxy for Total Bwd Packets
-    4:  "Total Length of Fwd Packets",
-    5:  "Bwd Packet Length Min",            # proxy for Total Bwd Bytes
-    6:  "Fwd Packet Length Max",
-    7:  "Fwd Packet Length Min",
-    14: "Flow Bytes/s",
-    44: "HTTP Status Code",                # slot 44 hijacked for HTTP Status Code
+# Model feature → HTTP transaction sensor slot mapping. Slot 5 contains total
+# response bytes, used as a transaction-level proxy for backward packet lengths.
+LABROOMS_FEATURE_SLOT_MAP: Dict[str, int] = {
+    "Flow Duration": 1,
+    "Total Fwd Packets": 2,
+    "Total Length of Fwd Packets": 4,
+    "Fwd Packet Length Max": 6,
+    "Fwd Packet Length Min": 7,
+    "Bwd Packet Length Max": 5,
+    "Bwd Packet Length Min": 5,
+    "Flow Bytes/s": 14,
+}
+
+PACKET_FEATURE_SLOT_MAP: Dict[str, int] = {
+    "Flow Duration": 1,
+    "Total Fwd Packets": 2,
+    "Total Length of Fwd Packets": 4,
+    "Fwd Packet Length Max": 6,
+    "Fwd Packet Length Min": 7,
+    "Bwd Packet Length Max": 10,
+    "Bwd Packet Length Min": 11,
+    "Flow Bytes/s": 14,
+}
+LABROOMS_FEATURE_SCHEMA = "labrooms-app-layer-v2"
+PACKET_FEATURE_SCHEMA = "packet-flow-v1"
+FEATURE_SLOT_MAPS = {
+    LABROOMS_FEATURE_SCHEMA: LABROOMS_FEATURE_SLOT_MAP,
+    PACKET_FEATURE_SCHEMA: PACKET_FEATURE_SLOT_MAP,
 }
 
 
@@ -150,9 +166,16 @@ def _load_artifacts() -> bool:
         return False
 
 
-def _extract_labrooms_features(raw_features: List[float]) -> Dict[str, float]:
-    """Map a 52-slot Labrooms vector to named CICIDS2017 feature dict."""
-    return {name: float(raw_features[idx]) for idx, name in LABROOMS_SLOT_MAP.items()}
+def _extract_features(
+    raw_features: List[float],
+    feature_schema: str = LABROOMS_FEATURE_SCHEMA,
+) -> Dict[str, float]:
+    """Map a 52-slot sensor vector to the model's named feature inputs."""
+    slot_map = FEATURE_SLOT_MAPS[feature_schema]
+    return {
+        name: float(raw_features[idx])
+        for name, idx in slot_map.items()
+    }
 
 
 # ── Live drift monitoring (TASK-08) ───────────────────────────────────────────
@@ -199,7 +222,7 @@ _adapter = LiveAdapter(
     state_dir=STATE_DIR,
     get_champion=_get_champion,
     set_champion=_set_champion,
-    extract_features=_extract_labrooms_features,
+    extract_features=_extract_features,
     consume_drift_event=_drift_monitor.consume_drift_event,
     reset_drift_reference=_drift_monitor.reset_reference,
 )
@@ -236,7 +259,8 @@ def model_info():
         "loaded_at": _model_loaded_at,
         "version": _adapter.champion_version,
         "target_classes": TARGET_CLASSES,
-        "feature_schema": "labrooms-app-layer-v1",
+        "feature_schema": "labrooms-app-layer-v2",
+        "accepted_feature_schemas": list(FEATURE_SLOT_MAPS),
         "active_features": LABROOMS_DEPLOYMENT_FEATURES,
         "num_active_features": len(LABROOMS_DEPLOYMENT_FEATURES),
     }
@@ -282,6 +306,15 @@ def _detect_labrooms_app_layer_anomaly(raw: List[float]) -> Optional[Tuple[str, 
     return None
 
 
+def _detect_schema_anomaly(
+    raw: List[float],
+    feature_schema: str,
+) -> Optional[Tuple[str, int, float]]:
+    if feature_schema == LABROOMS_FEATURE_SCHEMA:
+        return _detect_labrooms_app_layer_anomaly(raw)
+    return None
+
+
 @app.post("/predict")
 def predict():
     """
@@ -303,14 +336,24 @@ def predict():
     rows: List[Dict[str, float]] = []
     flow_ids: List[str] = []
     raw_vectors: List[List[float]] = []
+    verified_labels: List[Optional[str]] = []
+    feature_schemas: List[str] = []
     parse_errors: List[Dict] = []
 
     for i, flow in enumerate(flows):
         fid = flow.get("flow_id", f"flow_{i}")
         raw = flow.get("features")
+        verified_label = flow.get("ground_truth_label")
+        feature_schema = flow.get("feature_schema", LABROOMS_FEATURE_SCHEMA)
 
         if not isinstance(raw, list) or len(raw) != 52:
             parse_errors.append({"flow_id": fid, "reason": f"Expected 52 features, got {len(raw) if raw else 'none'}"})
+            continue
+        if not isinstance(feature_schema, str) or feature_schema not in FEATURE_SLOT_MAPS:
+            parse_errors.append({"flow_id": fid, "reason": "Unsupported feature_schema"})
+            continue
+        if verified_label is not None and verified_label not in TARGET_CLASSES:
+            parse_errors.append({"flow_id": fid, "reason": "Unsupported ground_truth_label"})
             continue
 
         if not all(isinstance(v, (int, float)) and not (v != v) for v in raw):
@@ -321,9 +364,11 @@ def predict():
         if raw_clamped[1] < 0:
             raw_clamped[1] = 0.0  # clamp negative flow duration
 
-        rows.append(_extract_labrooms_features(raw_clamped))
+        rows.append(_extract_features(raw_clamped, feature_schema))
         flow_ids.append(fid)
         raw_vectors.append(raw_clamped)
+        verified_labels.append(verified_label)
+        feature_schemas.append(feature_schema)
 
     if not rows:
         return jsonify({"error": "All flows were malformed", "details": parse_errors}), 422
@@ -347,20 +392,23 @@ def predict():
     # and reused by the adapter (T09) and evaluator (T10) inside the guarded
     # block below.
     batch_records: List[Dict[str, Any]] = []
-    for i, (fid, label_idx, raw_vec) in enumerate(zip(flow_ids, y_pred, raw_vectors)):
+    for i, (fid, label_idx, raw_vec, verified_label, feature_schema) in enumerate(
+        zip(flow_ids, y_pred, raw_vectors, verified_labels, feature_schemas)
+    ):
         # Model's raw output BEFORE any rule override (stored for pseudo-error
         # and pseudo-label consumers downstream).
         model_raw_index = int(label_idx)
         model_raw_label = TARGET_CLASSES[model_raw_index] if model_raw_index < len(TARGET_CLASSES) else "Unknown"
 
         # Check rule-based application-layer anomaly override for Labrooms traffic
-        app_anomaly = _detect_labrooms_app_layer_anomaly(raw_vec)
+        app_anomaly = _detect_schema_anomaly(raw_vec, feature_schema)
 
         if app_anomaly is not None:
             label, idx_val, conf_val = app_anomaly
             probs = {cls: (conf_val if cls == label else round((1.0 - conf_val) / (len(TARGET_CLASSES) - 1), 4)) for cls in TARGET_CLASSES}
             predictions.append({
                 "flow_id": fid,
+                "feature_schema": feature_schema,
                 "label": label,
                 "label_index": idx_val,
                 "confidence": conf_val,
@@ -381,6 +429,7 @@ def predict():
                         probs[cls] = 0.0
             predictions.append({
                 "flow_id": fid,
+                "feature_schema": feature_schema,
                 "label": label,
                 "label_index": int(label_idx),
                 "confidence": confidence,
@@ -389,6 +438,8 @@ def predict():
 
         batch_records.append({
             "flow_id": fid,                    # as received (may carry LBL:: tag)
+            "feature_schema": feature_schema,
+            "ground_truth_label": verified_label,
             "raw_features": raw_vec,           # the raw 52-slot vector
             "label": label,                    # FINAL label, post rule-override
             "label_index": idx_val,
@@ -496,29 +547,40 @@ def admin_reset():
 
 @app.get("/explain")
 def explain():
-    """Return feature importances and SHAP/LIME feature contributions for Labrooms application-layer model."""
+    """Return the active model's inputs and separate rule-only signals."""
     return jsonify({
-        "feature_schema": "labrooms-app-layer-v1",
-        "feature_importances": [
-            {"name": "Total Bwd Bytes [5] (Response Size)", "importance": 0.284, "category": "Application Payload"},
-            {"name": "Flow Bytes/s [14] (Throughput)", "importance": 0.241, "category": "Traffic Dynamics"},
-            {"name": "Flow Duration [1] (microseconds)", "importance": 0.195, "category": "Timing"},
-            {"name": "Total Fwd Bytes [4] (Request Size)", "importance": 0.142, "category": "Application Payload"},
-            {"name": "HTTP Status Code [44] (SYN Slot)", "importance": 0.088, "category": "HTTP Protocol"},
-            {"name": "Total Fwd Packets [2] (Request Count)", "importance": 0.025, "category": "Packet Stats"},
-            {"name": "Total Bwd Packets [3] (Response Count)", "importance": 0.025, "category": "Packet Stats"},
+        "feature_schema": "labrooms-app-layer-v2",
+        "feature_schemas": {
+            schema: [
+                {"name": name, "slot": slot}
+                for name, slot in slot_map.items()
+            ]
+            for schema, slot_map in FEATURE_SLOT_MAPS.items()
+        },
+        "packet_flow_note": "packet-flow-v1 slot 44 is TCP SYN count; HTTP status rules do not run for this schema.",
+        "rule_signals_schema": "labrooms-app-layer-v2",
+        "model_inputs": [
+            {"name": name, "slot": slot}
+            for name, slot in LABROOMS_FEATURE_SLOT_MAP.items()
+        ],
+        "rule_signals": [
+            {"slot": 1, "name": "Flow Duration", "purpose": "DoS override when duration exceeds 30 seconds"},
+            {"slot": 4, "name": "Total Fwd Bytes", "purpose": "Large-request web-attack rule"},
+            {"slot": 5, "name": "Total Bwd Bytes", "purpose": "Large-response exfiltration/web-attack rule"},
+            {"slot": 14, "name": "Flow Bytes/s", "purpose": "High-throughput brute-force rule"},
+            {"slot": 44, "name": "HTTP Status Code", "purpose": "HTTP 401/403/404/500/504 rule overrides"},
         ],
         "labrooms_10_feature_breakdown": [
-            {"index": 0, "name": "Flow ID Hash", "status": "Identifier (Omitted from ML)"},
-            {"index": 1, "name": "Flow Duration", "status": "Populated (Timing / Slowloris detection)"},
-            {"index": 2, "name": "Total Fwd Packets", "status": "Populated (HTTP Request count = 1)"},
-            {"index": 3, "name": "Total Bwd Packets", "status": "Populated (HTTP Response count = 1)"},
-            {"index": 4, "name": "Total Fwd Bytes", "status": "Populated (HTTP Request Size)"},
-            {"index": 5, "name": "Total Bwd Bytes", "status": "Populated (HTTP Response Size / Data Exfiltration)"},
-            {"index": 6, "name": "Fwd Pkt Len Max", "status": "Populated (HTTP Request Size)"},
-            {"index": 7, "name": "Fwd Pkt Len Min", "status": "Populated (HTTP Request Size)"},
-            {"index": 14, "name": "Flow Bytes/s", "status": "Populated (Throughput / Brute Force & Scraping)"},
-            {"index": 44, "name": "SYN Count / Status Code", "status": "Populated (HTTP Status Code 200/404/500)"},
+            {"index": 0, "name": "Flow ID Hash", "status": "Identifier; not a model input"},
+            {"index": 1, "name": "Flow Duration", "status": "Model input and rule signal"},
+            {"index": 2, "name": "Total Fwd Packets", "status": "Model input"},
+            {"index": 3, "name": "Total Bwd Packets", "status": "Not a model input"},
+            {"index": 4, "name": "Total Fwd Bytes", "status": "Model input and rule signal"},
+            {"index": 5, "name": "Total Bwd Bytes", "status": "Model input (proxy) and rule signal"},
+            {"index": 6, "name": "Fwd Pkt Len Max", "status": "Model input"},
+            {"index": 7, "name": "Fwd Pkt Len Min", "status": "Model input"},
+            {"index": 14, "name": "Flow Bytes/s", "status": "Model input and rule signal"},
+            {"index": 44, "name": "HTTP Status Code", "status": "Rule signal only; not a model input"},
         ],
     })
 
@@ -544,4 +606,3 @@ if __name__ == "__main__":
     debug = os.environ.get("FLASK_DEBUG", "0") == "1"
     logger.info(f"Starting CyberAdapt ML Inference API on port {port}")
     app.run(host="0.0.0.0", port=port, debug=debug)
-

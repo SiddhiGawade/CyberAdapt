@@ -26,12 +26,32 @@ const telemetryLogSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
+  featureSchema: {
+    type: String,
+    enum: ['labrooms-app-layer-v2', 'packet-flow-v1'],
+    default: 'labrooms-app-layer-v2',
+  },
   features: {
     type: [Number],
     validate: {
       validator: (arr) => arr.length === 52,
       message: 'features must contain exactly 52 numeric values',
     },
+  },
+  /* Optional independently verified label supplied by a trusted sensor. */
+  groundTruthLabel: {
+    type: String,
+    default: null,
+    enum: [
+      null,
+      'Normal Traffic',
+      'DoS',
+      'DDoS',
+      'Port Scanning',
+      'Brute Force',
+      'Web Attacks',
+      'Bots',
+    ],
   },
   /* ── ML Threat Classification (populated after ML inference) ── */
   threatLabel: {

@@ -8,6 +8,7 @@ ml/artifacts/*.pkl
 ml/artifacts/*.json
 ml/artifacts/state/
 ml/reports/figures/
+docker-reports/
 # keep the placeholder files
 !ml/artifacts/.gitkeep
 !ml/reports/figures/.gitkeep

@@ -57,7 +57,7 @@ The Markdown implementation plan and task records are in the [Member 3 documenta
 - **Concept drift:** a change over time in the relationship between traffic features and threat labels. With no ground-truth label on ordinary production traffic, the live monitor uses observable proxies and feature-distribution shifts; those signals are evidence of change, not a direct measurement of accuracy loss.
 - **Drift detection versus adaptation:** a detector raises a drift event; the adapter separately collects eligible labels, retrains a candidate, evaluates it against the current champion, and promotes only if gates pass.
 - **Champion/candidate:** the champion is the model serving predictions. A candidate is a newly trained model that must pass validation before it replaces the champion.
-- **Pseudo-label:** a label inferred from a simulator tag, a deterministic rule override, or a high-confidence Normal prediction. Live evaluation and retraining use these labels, so they are not equivalent to an independently labeled test set.
+- **Training label:** a supported `ground_truth_label` supplied by an independently labeled source, a simulator `LBL::` tag, or a deterministic rule override. Ordinary model predictions are not reused as training labels. Rule-derived labels cover only the patterns encoded by those rules.
 
 ## Source-of-truth notes
 

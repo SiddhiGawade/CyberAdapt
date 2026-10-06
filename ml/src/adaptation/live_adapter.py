@@ -27,8 +27,8 @@ singleton exists for standalone/notebook use only.
 
 Design notes
 ------------
-* Pseudo-label resolution follows §5.4 exactly (LBL:: flow_id tag ->
-  rule-override label -> high-confidence Normal -> else excluded).
+* Training labels come only from a verified label, an LBL:: simulator tag,
+  or a deterministic rule override; model predictions are never reused.
 * The 4-gate promotion semantics and gate-report shape replicate
   ``ml.src.models.adaptive_engine.AdaptiveModelManager`` (same
   ``PromotionGateConfig`` thresholds, same report keys: ``window_id``,
@@ -71,7 +71,6 @@ from ml.src.models.adaptive_engine import PromotionGateConfig
 logger = logging.getLogger(__name__)
 
 NORMAL_CLASS: str = "Normal Traffic"
-HIGH_CONFIDENCE_THRESHOLD: float = 0.90
 HISTORY_CAP: int = 50
 TRAIN_FRACTION: float = 0.75
 
@@ -127,8 +126,8 @@ class LiveAdapter:
         state_dir: Directory for adapter state files (``ml/artifacts/state``).
         get_champion: ``() -> (model, preprocessor)`` — current production pair.
         set_champion: ``(model, preprocessor, version: str) -> None`` — hot-swap.
-        extract_features: ``(raw_52: list) -> dict`` — raw Labrooms vector to
-            named feature dict (only LABROOMS_DEPLOYMENT_FEATURES keys are used).
+        extract_features: ``(raw_52: list, feature_schema: str) -> dict`` —
+            raw sensor vector to named model features.
         consume_drift_event: ``() -> dict | None`` — pops pending drift trigger.
         reset_drift_reference: ``() -> None`` — called after every retrain so
             the monitor's reference windows rebaseline post-adaptation.
@@ -143,7 +142,7 @@ class LiveAdapter:
         state_dir: Path,
         get_champion: Callable[[], Tuple[Any, Any]],
         set_champion: Callable[[Any, Any, str], None],
-        extract_features: Callable[[List[float]], Dict[str, float]],
+        extract_features: Callable[..., Dict[str, float]],
         consume_drift_event: Callable[[], Optional[Dict[str, Any]]],
         reset_drift_reference: Callable[[], None],
         capacity: int = 5000,
@@ -166,12 +165,13 @@ class LiveAdapter:
         self._lock = threading.Lock()
         self._buffer: "deque[Dict[str, Any]]" = deque(maxlen=self.capacity)
         self._label_sources: Dict[str, int] = {
+            "verified_label": 0,
             "rule_override": 0,
-            "high_confidence": 0,
             "flow_id_tag": 0,
         }
         self._history: List[Dict[str, Any]] = []          # gate reports, cap 50
         self._last_event: Optional[Dict[str, Any]] = None
+        self._pending_drift_event: Optional[Dict[str, Any]] = None
         self._version: str = "v1"
         self._champion_since: str = _utc_now_iso()
         self._retrain_in_progress: bool = False
@@ -189,14 +189,11 @@ class LiveAdapter:
         """Append pseudo-labeled samples (§5.4 rule) to the ring buffer.
 
         Resolution order per record:
-          1. ``LBL::<CLASS_NAME>::`` flow_id tag (underscores -> spaces, must
-             match TARGET_CLASSES) -> source ``flow_id_tag``.
-          2. ``rule_override`` fired -> final ``label`` is ground-truth quality
-             -> source ``rule_override``.
-          3. Model predicted ``Normal Traffic`` with confidence >= 0.90 ->
-             source ``high_confidence``.
-          4. Otherwise the record is excluded (unlabeled flows are never
-             buffered).
+          1. Explicit ``ground_truth_label`` from a trusted labeled source.
+          2. ``LBL::<CLASS_NAME>::`` simulator tag.
+          3. A deterministic rule override.
+          4. Otherwise the record is excluded. Model predictions are never
+             treated as training labels.
         """
         if not records:
             return
@@ -208,7 +205,10 @@ class LiveAdapter:
                 if resolved is None:
                     continue
                 y_idx, source = resolved
-                feats = self._extract_features(rec.get("raw_features"))
+                feats = self._extract_features(
+                    rec.get("raw_features"),
+                    rec.get("feature_schema", "labrooms-app-layer-v2"),
+                )
                 if not isinstance(feats, dict):
                     continue
                 row = {name: _safe_float(feats.get(name)) for name in LABROOMS_DEPLOYMENT_FEATURES}
@@ -231,48 +231,42 @@ class LiveAdapter:
     def maybe_trigger(self) -> None:
         """Fire an automatic retrain when a drift event is pending.
 
-        Consumes the monitor's pending drift event, then requires: no retrain
-        running, auto-trigger cooldown elapsed, and buffer minimums met.
-        Otherwise the event is dropped and a ``skipped`` entry is recorded in
-        ``last_event`` (insufficient-buffer / cooldown / busy as applicable).
+        Retains the drift event until the buffer and cooldown requirements are
+        met. A one-shot drift alert must not be lost while trusted labels arrive.
         """
-        try:
-            event = self._consume_drift_event()
-        except Exception as exc:
-            logger.warning(f"consume_drift_event() raised: {exc}")
-            return
-        if event is None:
-            return
-
-        trigger_desc = self._describe_drift_event(event)
-
         with self._lock:
+            if self._pending_drift_event is None:
+                try:
+                    self._pending_drift_event = self._consume_drift_event()
+                except Exception as exc:
+                    logger.warning(f"consume_drift_event() raised: {exc}")
+                    return
+            event = self._pending_drift_event
+            if event is None:
+                return
+
+            trigger_desc = self._describe_drift_event(event)
             if self._retrain_in_progress:
-                self._set_last_event_locked(
-                    "skipped",
-                    f"drift trigger dropped — retrain already in progress ({trigger_desc})",
-                )
+                self._set_last_event_locked("waiting", f"retrain already in progress ({trigger_desc})")
                 self._persist_state_locked()
                 return
             elapsed = time.time() - self._last_auto_trigger_ts
             if elapsed < self.cooldown_sec:
                 self._set_last_event_locked(
-                    "skipped",
-                    f"drift trigger dropped — cooldown active "
-                    f"({self.cooldown_sec - elapsed:.0f}s remaining) ({trigger_desc})",
+                    "waiting",
+                    f"cooldown active ({self.cooldown_sec - elapsed:.0f}s remaining) ({trigger_desc})",
                 )
                 self._persist_state_locked()
                 return
             ok, detail, _n = self._buffer_check_locked()
             if not ok:
-                self._set_last_event_locked(
-                    "skipped",
-                    f"skipped — insufficient buffer: {detail} ({trigger_desc})",
-                )
+                self._set_last_event_locked("waiting", f"waiting for trusted labels: {detail} ({trigger_desc})")
                 self._persist_state_locked()
                 return
+            self._pending_drift_event = None
             self._retrain_in_progress = True
             self._last_auto_trigger_ts = time.time()
+            self._persist_state_locked()
 
         self._spawn_retrain(trigger_desc)
 
@@ -297,7 +291,9 @@ class LiveAdapter:
                 )
                 self._persist_state_locked()
                 return {"status": "insufficient", "detail": detail, "buffer_size": n}
+            self._pending_drift_event = None
             self._retrain_in_progress = True
+            self._persist_state_locked()
 
         trigger_desc = f"Manual trigger ({reason})"
         self._spawn_retrain(trigger_desc)
@@ -357,6 +353,7 @@ class LiveAdapter:
                 self._label_sources[k] = 0
             self._history.clear()
             self._last_event = None
+            self._pending_drift_event = None
             self._version = "v1"
             self._champion_since = _utc_now_iso()
             self._last_auto_trigger_ts = 0.0
@@ -377,7 +374,12 @@ class LiveAdapter:
 
         Must stay semantically identical to LiveEvaluator's copy (TASK-05).
         """
-        # 1. LBL::<CLASS_NAME>:: flow_id tag (simulator ground truth)
+        # 1. Explicit label from an independently labeled, trusted source.
+        label = rec.get("ground_truth_label")
+        if label in TARGET_CLASSES:
+            return TARGET_CLASSES.index(label), "verified_label"
+
+        # 2. LBL::<CLASS_NAME>:: flow_id tag (simulator ground truth)
         flow_id = str(rec.get("flow_id") or "")
         if flow_id.startswith("LBL::"):
             parts = flow_id.split("::")
@@ -389,7 +391,7 @@ class LiveAdapter:
             # on a simulator-tagged flow.
             return None
 
-        # 2. Rule-override label — final post-override label is GT-quality
+        # 3. Rule-override label — final post-override label is rule-derived.
         if rec.get("rule_override"):
             label = rec.get("label")
             if label in TARGET_CLASSES:
@@ -399,14 +401,7 @@ class LiveAdapter:
                 return int(idx), "rule_override"
             return None
 
-        # 3. High-confidence Normal (model label Normal, conf >= 0.90, no rule)
-        if (
-            rec.get("label") == NORMAL_CLASS
-            and _safe_float(rec.get("confidence")) >= HIGH_CONFIDENCE_THRESHOLD
-        ):
-            return TARGET_CLASSES.index(NORMAL_CLASS), "high_confidence"
-
-        # 4. Unlabeled — excluded
+        # Unlabeled — model predictions are not promoted to training labels.
         return None
 
     # ── Trigger helpers ──────────────────────────────────────────────────────
@@ -721,7 +716,7 @@ class LiveAdapter:
             logger.warning(f"Could not persist adaptation_history.json: {exc}")
 
     def _persist_state_locked(self) -> None:
-        """Write adapter_state.json (version + label_sources + last_event). Caller holds lock."""
+        """Write adapter_state.json. Caller holds lock."""
         try:
             _write_json(
                 self.state_dir / "adapter_state.json",
@@ -729,6 +724,7 @@ class LiveAdapter:
                     "version": self._version,
                     "label_sources": dict(self._label_sources),
                     "last_event": self._last_event,
+                    "pending_drift_event": self._pending_drift_event,
                 },
             )
         except Exception as exc:
@@ -766,6 +762,9 @@ class LiveAdapter:
             le = state.get("last_event")
             if isinstance(le, dict):
                 self._last_event = le
+            pending = state.get("pending_drift_event")
+            if isinstance(pending, dict):
+                self._pending_drift_event = pending
 
         if not restored_version:
             promoted = [r for r in self._history if r.get("promoted")]
@@ -791,23 +790,37 @@ _SINGLETON_LOCK = threading.Lock()
 _DEFAULT_ADAPTER: Optional[LiveAdapter] = None
 _SINGLETON_CHAMPION: Dict[str, Any] = {"model": None, "preprocessor": None}
 
-# Local copy of api.py's LABROOMS_SLOT_MAP (keeps the singleton self-contained
+# Local copy of api.py's feature-to-slot map (keeps the singleton self-contained
 # without importing ml.api).
-_LABROOMS_SLOT_MAP: Dict[int, str] = {
-    1: "Flow Duration",
-    2: "Total Fwd Packets",
-    3: "Bwd Packet Length Max",
-    4: "Total Length of Fwd Packets",
-    5: "Bwd Packet Length Min",
-    6: "Fwd Packet Length Max",
-    7: "Fwd Packet Length Min",
-    14: "Flow Bytes/s",
-    44: "HTTP Status Code",
+_LABROOMS_FEATURE_SLOT_MAP: Dict[str, int] = {
+    "Flow Duration": 1,
+    "Total Fwd Packets": 2,
+    "Total Length of Fwd Packets": 4,
+    "Fwd Packet Length Max": 6,
+    "Fwd Packet Length Min": 7,
+    "Bwd Packet Length Max": 5,
+    "Bwd Packet Length Min": 5,
+    "Flow Bytes/s": 14,
 }
 
 
-def _default_extract_features(raw_features: List[float]) -> Dict[str, float]:
-    return {name: _safe_float(raw_features[idx]) for idx, name in _LABROOMS_SLOT_MAP.items()}
+def _default_extract_features(
+    raw_features: List[float],
+    feature_schema: str = "labrooms-app-layer-v2",
+) -> Dict[str, float]:
+    slot_map = _LABROOMS_FEATURE_SLOT_MAP
+    if feature_schema == "packet-flow-v1":
+        slot_map = {
+            **_LABROOMS_FEATURE_SLOT_MAP,
+            "Bwd Packet Length Max": 10,
+            "Bwd Packet Length Min": 11,
+        }
+    elif feature_schema != "labrooms-app-layer-v2":
+        raise ValueError(f"Unsupported feature schema: {feature_schema}")
+    return {
+        name: _safe_float(raw_features[idx])
+        for name, idx in slot_map.items()
+    }
 
 
 def _default_adapter() -> LiveAdapter:

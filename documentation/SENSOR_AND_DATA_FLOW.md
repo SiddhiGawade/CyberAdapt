@@ -16,6 +16,8 @@ There is no Labrooms website implementation or dedicated website instrumentation
 
 `sensor.py` has no website URL or host filter: it only sees IP packets visible on the local capture interface. To observe a particular authorized app's traffic, the sensor must be placed on that host/network path or receive a mirrored copy of the relevant traffic; entering the website URL alone cannot make a remote site's packets visible.
 
+The Labrooms Express middleware supplied for this integration is a third input mode: it records one HTTP request/response transaction from Express timing, socket byte counters, and the response status. It is application telemetry, not a packet sniffer. In that middleware, `req.socket.bytesRead` and `res` socket `bytesWritten` are connection-level cumulative counters; on keep-alive sockets they are not reliable per-request/per-response byte counts. Use request/response-specific byte measurements before treating slots 4 and 5 as exact sizes.
+
 ## 2. What `sensor/sensor.py` does
 
 The real sensor is a passive packet sniffer. It does not send attack traffic, log into a website, or read a web server's application database. Its job is to observe visible IP packets and turn packet metadata into per-flow statistics.
@@ -116,20 +118,11 @@ The normal and attack generators build a list of 52 zeros, fill only a small set
 - `simulate_attacks.py` emits one batch of four attack profiles and one normal profile. It uses deterministic example-like feature values, then queries the ML endpoint to print predictions.
 - `mock_sensor.py` fabricates random network-looking feature arrays and does not require Scapy/libpcap or root/admin privileges.
 
-The generator vectors populate slots `[0, 1, 2, 3, 4, 5, 6, 7, 14, 44]`. In these app-layer vectors, slot 44 is used for an HTTP status code. In the Scapy sensor, slot 44 is the TCP SYN count. This is not a cosmetic naming difference; rules and PSI monitoring interpret the number differently.
+The generator vectors populate slots `[0, 1, 2, 3, 4, 5, 6, 7, 14, 44]`. In these app-layer vectors, slot 44 is an HTTP status code. In the Scapy sensor, slot 44 is a TCP SYN count. These inputs now declare distinct `feature_schema` values: `labrooms-app-layer-v2` and `packet-flow-v1`. The API applies HTTP status rules only to the Labrooms schema; it uses packet slots 10/11 for backward packet-length features in the packet schema. PSI drift monitoring uses the four common duration/byte/rate slots, not slot 44.
 
-## 4. Critical feature-contract mismatch before using real capture
+For packet capture, the sensor defines forward direction as the first packet's source-to-destination direction within each observed flow window. The sensor captures packet metadata and sizes; it does not decrypt TLS or recover HTTP methods/status codes. Thus, the packet path classifies from packet statistics and cannot use the Labrooms-only HTTP rules.
 
-The current inference API and live rules are built around the generated `labrooms-app-layer-v1` convention. `ml/api.py` treats slot 44 as HTTP status for rule overrides, and `LiveDriftMonitor` labels slot 44 as HTTP Status Code for PSI. But the real Scapy sensor writes TCP SYN count at index 44 and does not parse HTTP status.
-
-There are additional alignment risks:
-
-1. The Labrooms training contract says only ten of 52 slots are populated; `sensor.py` computes many packet-level statistics and therefore emits a different pattern.
-2. The live model's feature contract maps slot 3 (backward packet count) to CICIDS2017 `Bwd Packet Length Max` as a proxy and slot 5 (backward bytes) to `Bwd Packet Length Min` as a proxy. These are not identical quantities or units.
-3. `sensor.py` chooses forward/backward direction by lexicographic canonicalization, not by knowing which endpoint is the web client. The Labrooms app-layer contract interprets forward as request and backward as response.
-4. The Scapy sensor captures IP metadata; it does not decrypt TLS or parse HTTP. HTTP status-dependent rules cannot be populated from this script as written.
-
-**Practical conclusion:** the demo generators and the real Scapy sensor are separate input modes. Before connecting `sensor.py` to the current Labrooms model, agree on one schema and align packet direction, slot meanings, preprocessing, app-layer status collection, drift feature names, and training data. For actual application status/route metadata, instrument the authorized application/server explicitly rather than assuming encrypted packet capture reveals it.
+The two schemas now avoid the prior slot collision, but this is not evidence that the model is accurate on captured traffic. The deployed model was trained on CICIDS2017; packet-direction, sampling, local-loopback, and dataset distribution differences still require labeled validation data before making production claims. The local packet-capture test checks actual capture, feature transport, and inference only.
 
 ## 5. What happens after a sensor POST
 
@@ -141,16 +134,22 @@ A typical payload looks like this (feature values omitted):
   "batch_timestamp": 1791111111.0,
   "flow_count": 1,
   "flows": [
-    { "flow_id": "flow-example", "features": ["52 numeric values"] }
+    {
+      "flow_id": "flow-example",
+      "features": ["52 numeric values"],
+      "ground_truth_label": "DoS"
+    }
   ]
 }
 ```
+
+`ground_truth_label` is optional and must be one of the seven supported classes. Include it only when an independent source actually knows the flow's label; it is carried to the ML service for evaluation and candidate training. The Labrooms middleware as provided does not currently send this field.
 
 The sensor sends it to the Node route with `X-Sensor-Key`. In [`server/routes/telemetry.js`](../server/routes/telemetry.js):
 
 1. `authenticateSensor` hashes the key with SHA-256 and finds an active `ApiKey` record.
 2. The route requires `sensor_id`, `batch_timestamp`, and a `flows` array. Each flow needs an ID and exactly 52 numeric values. Negative duration at slot 1 is clamped to zero.
-3. Valid flows are inserted into `TelemetryLog` with company, sensor, batch timestamp, flow ID, and raw feature values.
+3. Valid flows are inserted into `TelemetryLog` with company, sensor, batch timestamp, flow ID, raw feature values, and an optional verified ground-truth label.
 4. Node updates the sensor key's `lastIngestAt` and returns HTTP 202 with accepted/rejected counts.
 5. After sending 202, Node asynchronously forwards the inserted batch to Flask `/predict`. If Flask returns predictions, Node bulk-updates the matching Mongo documents with label and confidence.
 
@@ -166,7 +165,7 @@ In `ml/api.py`, `/predict`:
 2. Maps named Labrooms slots to the eight model features and applies the stored preprocessor.
 3. Runs the active classifier and, where available, obtains class probabilities.
 4. Applies deterministic app-layer overrides for specific patterns such as long-duration/504 DoS, very large response payloads, selected 401/403 or high-rate error patterns, and HTTP 500/large error requests.
-5. Builds a batch record containing the raw vector, final label, original model label, confidence, and whether a rule overrode the model.
+5. Builds a batch record containing the raw vector, final label, original model label, confidence, whether a rule overrode the model, and any verified label.
 6. Feeds the records to live drift monitoring, the pseudo-label buffer, and the rolling evaluator.
 
 The React pages fetch through Node. The live traffic table reads recent flow documents; the Concept Drift, Adaptation, and Evaluation pages read the Flask-derived state through Node proxy routes. The application endpoints and pages are listed in [Project Architecture](PROJECT_ARCHITECTURE.md).
@@ -177,3 +176,4 @@ The React pages fetch through Node. The live traffic table reads recent flow doc
 - Capture only traffic on networks and systems for which collection is authorized.
 - Keep the sensor and server reachable over a protected network; local development defaults are plain HTTP and are not deployment security controls.
 - Use generators for reproducible UI/algorithm demos, but label them as synthetic. Use packet capture only after resolving the feature-contract mismatch above.
+- Drift can be detected without labels, but candidate training requires trusted labels: an explicit `ground_truth_label`, a simulator tag, or a deterministic rule override. A drift event waits for sufficient labeled data; model-only guesses are never used as training truth.

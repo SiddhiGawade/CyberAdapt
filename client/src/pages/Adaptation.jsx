@@ -155,7 +155,7 @@ export default function Adaptation() {
             Buffer load: {buffer?.fill_percentage ?? '—'}%
           </p>
           <p className="text-[11px] text-cyber-dim font-mono mt-1">
-            Labels — rule:{labelSources.rule_override || 0} · conf:{labelSources.high_confidence || 0} · tag:{labelSources.flow_id_tag || 0}
+            Labels — verified:{labelSources.verified_label || 0} · rule:{labelSources.rule_override || 0} · tag:{labelSources.flow_id_tag || 0}
           </p>
         </div>
       </div>

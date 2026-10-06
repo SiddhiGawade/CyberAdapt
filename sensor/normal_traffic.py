@@ -5,7 +5,7 @@ CyberAdapt Normal Traffic Generator — sustained benign flow telemetry.
 Emulates ordinary users browsing the Labrooms site: short HTTP request /
 response exchanges that the champion model should label "Normal Traffic"
 with no rule-override firing. This is the demo's "before" state and the
-adaptation buffer's high-confidence Normal label source.
+adaptation buffer's Normal label source when `--lbl-tag` is enabled.
 
 Each flow is a 52-slot Labrooms vector with the same layout as
 simulate_attacks.build_labrooms_flow (10 populated slots, rest zeroed):
@@ -25,7 +25,7 @@ bytes << 10 MB, no 401/403/500/504 statuses, and 404 bodies are kept small
 line for error statuses.
 
 Usage:
-  python sensor/normal_traffic.py --key "ca_live_..." [--duration 60]
+  python sensor/normal_traffic.py --key "ca_live_..." --lbl-tag [--duration 60]
 
 Or via environment variables:
   SENSOR_KEY="ca_live_..."  INGEST_URL="http://localhost:5000/api/telemetry/ingest"  python sensor/normal_traffic.py

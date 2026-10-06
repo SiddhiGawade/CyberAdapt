@@ -80,8 +80,8 @@ The default reference/recent window size is 500. **At least two PSI slots above 
 The live event rule is:
 
 ```text
-ADWIN(attack_ratio)
-OR Page-Hinkley(attack_ratio)
+ADWIN(predicted_attack_ratio)
+OR Page-Hinkley(predicted_attack_ratio)
 OR at least 2 PSI slots above 0.25
 ```
 
@@ -99,10 +99,10 @@ The model is **not** changed immediately when drift is detected. The live adapte
 
 The adapter resolves a label in this order:
 
-1. A simulator-provided class in a `LBL::<CLASS_NAME>::...` flow ID.
-2. The final label from a deterministic application-rule override.
-3. `Normal Traffic` when the model predicts Normal with confidence of at least `0.90` and no rule override applies.
-4. Otherwise, the flow is excluded from adaptation training.
+1. An independently verified `ground_truth_label`.
+2. A simulator-provided class in a `LBL::<CLASS_NAME>::...` flow ID.
+3. The final label from a deterministic application-rule override.
+4. Otherwise, the flow is excluded; model predictions are not used as training labels.
 
 This means a drift alert alone does not tell the model what a new attack is. To learn a particular attack, the buffer needs examples with a usable label for that attack.
 
@@ -189,7 +189,7 @@ To avoid replacing the current model with a candidate that performs worse overal
 
 **Q: What is the main limitation of the live adaptation demo?**
 
-Most live traffic has no independently verified labels. Rule-based labels cover only known patterns, and high-confidence Normal labels are self-generated, so reported live metrics are pseudo-labeled.
+Most live traffic has no independently verified labels. Only explicitly supplied verified labels, simulator tags, or deterministic rule overrides are used; ordinary model predictions are excluded. Rule labels cover only known patterns.
 
 ## Implementation references
 

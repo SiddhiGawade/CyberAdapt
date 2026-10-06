@@ -13,6 +13,16 @@ const auth               = require('../middleware/auth');
 /* ─────────────── FEATURE SCHEMA CONSTANTS ─────────────────── */
 const FEATURE_COUNT     = 52;
 const FLOW_DURATION_IDX = 1;   // index of flow-duration in the 52-feature vector
+const FEATURE_SCHEMAS   = new Set(['labrooms-app-layer-v2', 'packet-flow-v1']);
+const TARGET_CLASSES    = new Set([
+  'Normal Traffic',
+  'DoS',
+  'DDoS',
+  'Port Scanning',
+  'Brute Force',
+  'Web Attacks',
+  'Bots',
+]);
 
 /* ── ML Inference microservice URL (set ML_API_URL in .env) ── */
 const ML_API_URL = (process.env.ML_API_URL || 'http://127.0.0.1:5001').replace(/\/$/, '');
@@ -27,7 +37,12 @@ const ML_API_URL = (process.env.ML_API_URL || 'http://127.0.0.1:5001').replace(/
 async function classifyAndAnnotate(flowDocs) {
   try {
     const payload = {
-      flows: flowDocs.map((doc) => ({ flow_id: doc.flowId, features: doc.features })),
+      flows: flowDocs.map((doc) => ({
+        flow_id: doc.flowId,
+        features: doc.features,
+        feature_schema: doc.featureSchema,
+        ...(doc.groundTruthLabel ? { ground_truth_label: doc.groundTruthLabel } : {}),
+      })),
     };
 
     const ctrl    = new AbortController();
@@ -106,6 +121,20 @@ router.post('/ingest', authenticateSensor, async (req, res, next) => {
         continue;
       }
 
+      const featureSchema = f.feature_schema || 'labrooms-app-layer-v2';
+      if (typeof featureSchema !== 'string' || !FEATURE_SCHEMAS.has(featureSchema)) {
+        errors.push({ index: i, reason: 'feature_schema must be a supported sensor schema' });
+        continue;
+      }
+
+      if (
+        f.ground_truth_label != null
+        && (typeof f.ground_truth_label !== 'string' || !TARGET_CLASSES.has(f.ground_truth_label))
+      ) {
+        errors.push({ index: i, reason: 'ground_truth_label must be a supported verified class label' });
+        continue;
+      }
+
       const allNumbers = f.features.every((v) => typeof v === 'number' && !Number.isNaN(v));
       if (!allNumbers) {
         errors.push({ index: i, reason: 'All features must be finite numbers' });
@@ -123,7 +152,9 @@ router.post('/ingest', authenticateSensor, async (req, res, next) => {
         sensorId:       sensor_id,
         batchTimestamp: batch_timestamp,
         flowId:         f.flow_id,
+        featureSchema,
         features,
+        groundTruthLabel: f.ground_truth_label || null,
       });
     }
 
@@ -295,4 +326,3 @@ router.post('/admin/reset', auth, async (req, res, next) => {
 });
 
 module.exports = router;
-

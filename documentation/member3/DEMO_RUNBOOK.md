@@ -21,17 +21,14 @@ These four rules decide whether the demo works. Skim the failure playbook
    it has seen **≥500 flows**. Drift cannot latch while warming up — at the
    presentation cadence (4 flows/s) that's ~125 s of baseline. This is why
    Act 1 exists; do not shorten it below 500 flows.
-2. **Priming before drift.** Auto-promotion needs a buffer of **≥200 labeled
-   flows, ≥30 non-Normal, ≥2 classes** *before the first drift event fires*.
-   Normal traffic alone fills the buffer with `high_confidence` Normal labels
-   only — if drift fires on an all-Normal buffer the adapter records
-   `skipped — insufficient buffer` and the story stalls. That's why the
-   `seed dos 90` step (the attack reveal) runs **before** `attack_campaign`.
-3. **The skipped-event latch.** A *skipped* drift event **holds the drift
-   latch** — no further auto-events fire until a retrain *completes*
-   (promoted **or** rejected, either runs `reset_reference()`) or you hit
-   `/admin/reset`. A skipped event is not a crash, but it silently suppresses
-   later events — the #1 "why did nothing happen" cause.
+2. **Labeled data before promotion.** Auto-promotion needs **≥200 labeled
+   flows, ≥30 non-Normal, ≥2 classes**. Normal traffic counts only when it
+   carries a simulator label or independently verified `ground_truth_label`;
+   model predictions are not training labels.
+3. **Drift events wait for labels.** If the buffer is short when drift fires,
+   the adapter keeps that event pending and retries as labeled flows arrive.
+   The buffer itself is in memory, so a restart requires labels to be collected
+   again before retraining can begin.
 4. **Buffer composition → gate outcome.** On a normal-heavy buffer retrains
    promote deterministically (delta gates are ≥ −0.01). On an
    attack-dominated buffer (≳3.7 k tagged attack labels) retrains can be
@@ -177,7 +174,7 @@ runs — cosmetic only.
 **Step 1.** Driver terminal:
 
 ```powershell
-python sensor/normal_traffic.py --interval 2 --batch-size 8 --duration 140
+python sensor/normal_traffic.py --lbl-tag --interval 2 --batch-size 8 --duration 140
 ```
 
 Expected: `[Batch NNNN] OK Sent 8 flows -> HTTP 202` ~every 2 s;
@@ -191,8 +188,8 @@ n≈500–552; `drift_state: stable`; all detector cards green; PSI table
 ~0.00–0.10 (measured max 0.0976).
 
 **Step 4.** **Adaptation** tab: buffer `current_size` climbing toward ~560,
-`label_sources.high_confidence` == current_size (untagged normals earn
-high-confidence pseudo-labels — §5.4 of the design).
+`label_sources.verified_label` or `label_sources.flow_id_tag` climbing for
+independently labeled/simulator-tagged normal traffic.
 
 > **SAY:** *"This is the Labrooms production app in steady state — sensors
 > stream flows, the model calls everything Normal with >99% confidence, and
@@ -380,7 +377,7 @@ skip the FORCE beat, keep everything else.
 
 - [ ] **Live Traffic** — green `Normal Traffic` rows at conf ≥0.99 (Act 1)
 - [ ] **Concept Drift** — `active` + `stable`, all detectors green, PSI ~0 (Act 1)
-- [ ] **Adaptation** — buffer `current_size`/`label_sources.high_confidence` climbing (Act 1)
+- [ ] **Adaptation** — buffer `current_size`/verified-or-tagged labels climbing (Act 1)
 - [ ] **Live Traffic** — red flood: DoS → Brute Force → Web Attacks, `attack_ratio 1.00` (Act 2–3)
 - [ ] **Concept Drift** — red DRIFT banner + events list row `PSI drift alert (feature_psi)` (Act 2)
 - [ ] **Concept Drift** — PSI table peaks (slot 1 ≈9, slot 5 ≈12, slots 14/44 ≈7–10) (Act 3)

@@ -70,22 +70,21 @@ These class names and their order are fixed in [`feature_contract.py`](../ml/src
 
 ## 2. Feature contract: from 52 sensor slots to 8 model inputs
 
-The live API accepts a **52-number vector**. The deployed model uses schema `labrooms-app-layer-v1` and selects only eight values. This is intended to avoid training on features that the Labrooms-shaped generators leave at zero.
+The live API accepts a **52-number vector**. The deployed model uses schema `labrooms-app-layer-v2` and selects eight named values.
 
 | Zero-based input slot | CICIDS2017 model column | Meaning / caveat |
 |---:|---|---|
 | 1 | `Flow Duration` | Flow/request duration |
 | 2 | `Total Fwd Packets` | Forward packet count |
-| 3 | `Bwd Packet Length Max` | Proxy for backward packet count; not an exact equivalent |
 | 4 | `Total Length of Fwd Packets` | Forward bytes / request size |
-| 5 | `Bwd Packet Length Min` | Proxy for backward bytes; not an exact equivalent |
+| 5 | `Bwd Packet Length Max` and `Bwd Packet Length Min` | Response-byte total is used for both packet-length proxies |
 | 6 | `Fwd Packet Length Max` | Maximum forward packet length |
 | 7 | `Fwd Packet Length Min` | Minimum forward packet length |
 | 14 | `Flow Bytes/s` | Flow throughput |
 
-Slot 0 is an identifier and is not learned. Slot 44 is omitted from the model because CICIDS2017 has no matching HTTP status feature; the live application rules and live PSI monitor nevertheless inspect slot 44.
+Slot 0 is an identifier and is not learned. Slot 3 is a response count and is not used as a packet length. Slot 44 is omitted from the model because CICIDS2017 has no matching HTTP status feature; the live application rules and live PSI monitor nevertheless inspect slot 44. The slot-5 response-byte total is not a true packet-level min/max length.
 
-**Important input-mode limitation:** the normal/attack demo generators create Labrooms-shaped application-flow vectors. The Scapy sensor produces packet-level features, and in its implementation slot 44 is a TCP SYN count—not an HTTP status code. It also does not parse HTTP status codes. The slot-3 and slot-5 feature mappings are proxies. Therefore, the real packet-capture sensor and the synthetic Labrooms input are not interchangeable without aligning their feature meanings. See [Sensor and End-to-End Data Flow](SENSOR_AND_DATA_FLOW.md).
+**Important input-mode limitation:** the normal/attack demo generators create Labrooms-shaped application-flow vectors. The Scapy sensor produces packet-level features, and its slot 44 is a TCP SYN count—not an HTTP status code. The supplied Labrooms Express middleware emits application-level request/response telemetry, not packet captures. Its response-byte total is only a proxy for packet lengths. See [Sensor and End-to-End Data Flow](SENSOR_AND_DATA_FLOW.md).
 
 ## 3. Initial preprocessing, split, and model training
 
@@ -156,9 +155,9 @@ The serving sequence is therefore **model prediction -> optional rule override -
 
 | Signal | What the implementation monitors | Role in live drift event? |
 |---|---|---|
-| ADWIN (`delta=0.002`) | One **attack ratio** per batch: fraction of final labels that are not `Normal Traffic` | Yes |
-| Page-Hinkley | The same batch attack-ratio stream | Yes |
-| PSI | Feature-distribution shift on raw slots 1, 4, 5, 14, and 44; 10 histogram bins; `log1p` for slots 1/4/5/14 and raw values for slot 44 | Yes, if at least two slots have PSI > 0.25 |
+| ADWIN (`delta=0.002`) | One **predicted attack ratio** per batch: fraction of model outputs that are not `Normal Traffic` | Yes |
+| Page-Hinkley | The same predicted-class ratio stream | Yes |
+| PSI | Feature-distribution shift on common raw slots 1, 4, 5, and 14; 10 histogram bins with `log1p` | Yes, if at least two slots have PSI > 0.25 |
 | Confidence ADWIN (`delta=0.01`) | Mean prediction confidence per batch | Warning/status only |
 | DDM-style pseudo-error | On rule-overridden flows only, compares the final rule label with the model's raw label | Warning/status only |
 | KS test | Two-sample comparison of raw slot 14 against reference/recent values; needs at least 10 samples per side and flags p < 0.05 | Diagnostic/status only |
@@ -166,10 +165,10 @@ The serving sequence is therefore **model prediction -> optional rule override -
 PSI status is stable below 0.10, a minor shift from 0.10 through 0.25, and drifted above 0.25. PSI uses a reference set and a rolling recent window of up to 500 flows. The actual live event decision is:
 
 ```text
-ADWIN(attack_ratio) OR Page-Hinkley(attack_ratio) OR at least 2 PSI slots above 0.25
+ADWIN(predicted_attack_ratio) OR Page-Hinkley(predicted_attack_ratio) OR at least 2 PSI slots above 0.25
 ```
 
-A confidence warning, DDM signal, or KS result by itself does not trigger retraining. When an event fires, the monitor records it, latches drift to avoid repeated events, rotates its feature reference, and exposes one pending event for the adapter. It persists monitor state under `ml/artifacts/state/drift_state.json`.
+A confidence warning, DDM signal, or KS result by itself does not trigger retraining. The predicted attack ratio is based on model outputs, not ground-truth labels; an alert indicates changed predictions/features and does not prove an attack or concept drift. When an event fires, the monitor records it, latches drift to avoid repeated events, rotates its feature reference, and exposes one pending event for the adapter. It persists monitor state under `ml/artifacts/state/drift_state.json`.
 
 The API reports `warming_up` until 500 samples have arrived since reset, but the current drift-decision code does **not** gate its event expression on that status. Treat `warming_up` as status text, not a guarantee that no event can fire.
 
@@ -185,14 +184,14 @@ The live ADWIN input is the model's predicted attack fraction, not `y_true != y_
 
 The adapter's ring buffer holds up to 5,000 examples. It resolves labels in this order:
 
-1. `LBL::<CLASS_NAME>::...` in a demo flow ID (simulator label).
-2. The final label from a deterministic app-layer rule override.
-3. A `Normal Traffic` prediction with confidence at least 0.90 and no override.
-4. Other records are excluded because they have no usable label.
+1. `ground_truth_label` supplied by an independently labeled source.
+2. `LBL::<CLASS_NAME>::...` in a demo flow ID (simulator label).
+3. The final label from a deterministic app-layer rule override.
+4. Other records are excluded; the model's own prediction is never treated as ground truth.
 
 Automatic retraining requires at least **200 labeled records**, at least **two classes**, and at least **30 non-Normal records**. Only one retrain can run at a time. Automatic drift triggers have a 60-second cooldown. The dashboard's manual trigger bypasses that cooldown but still requires a ready buffer and no active retrain.
 
-If the adapter consumes a drift event before the buffer meets the minimums, it records a skipped event. The current monitor remains latched, so that same event is not automatically re-queued. Once the buffer is ready, the manual trigger can still request retraining; a demo reset instead starts a fresh monitoring cycle and clears the accumulated state.
+If a drift event arrives before the buffer meets the minimums, the adapter retains the event and waits for enough eligible labels. It triggers automatically once the buffer is ready and the cooldown has elapsed. The pending event is persisted, but the sample buffer is in memory and must be refilled after a restart.
 
 ### 7.2 Train and validate a candidate
 
@@ -231,7 +230,7 @@ The relevant live endpoints are `GET /concept-drift`, `GET /adaptation`, `POST /
 
 [`LiveEvaluator`](../ml/src/evaluation/live_evaluator.py) keeps up to 500 pseudo-labeled examples and reports accuracy, macro/per-class precision/recall/F1, confusion matrix, and p95 latency. It returns `insufficient_data` until it has 30 labeled records and provides a pre/post-promotion comparison.
 
-Because its labels come from simulator tags, rule overrides, or high-confidence Normal predictions, the live metrics are **pseudo-labeled metrics**, not independent production accuracy. The adapter and evaluator intentionally use similar label sources so their scores describe the same selected subset.
+Because its labels come from verified labels, simulator tags, or deterministic rule overrides, the live metrics are not an independent production benchmark. Ordinary model predictions are excluded from both retraining and evaluation labels.
 
 Important state/artifact paths:
 

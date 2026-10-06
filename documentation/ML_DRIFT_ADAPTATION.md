@@ -20,20 +20,23 @@ The class distribution is highly imbalanced: the executed training notebook repo
 
 ### Eight model inputs
 
-The Labrooms deployment schema is named `labrooms-app-layer-v1`. The model does not use every slot of the incoming 52-value vector. The Flask API selects the following eight CICIDS2017 input columns:
+The HTTP transaction schema is `labrooms-app-layer-v2`; the Scapy capture schema is `packet-flow-v1`. Both map into the same eight CICIDS2017 model columns, but some source slots differ. For raw packet flows, backward packet-length min/max come from slots 10 and 11; slot 44 remains TCP SYN count and is not treated as an HTTP status.
+
+For `labrooms-app-layer-v2`, the Flask API selects the following eight CICIDS2017 input columns:
 
 | Incoming slot | Labrooms description | CICIDS2017 model column |
 |---:|---|---|
 | 1 | Flow duration in microseconds | `Flow Duration` |
 | 2 | Forward packet count | `Total Fwd Packets` |
-| 3 | Backward packet count | `Bwd Packet Length Max` (declared proxy) |
 | 4 | Forward byte total / request size | `Total Length of Fwd Packets` |
-| 5 | Backward byte total / response size | `Bwd Packet Length Min` (declared proxy) |
+| 5 | Response bytes | `Bwd Packet Length Max` and `Bwd Packet Length Min` (transaction-level proxies) |
 | 6 | Maximum forward packet length | `Fwd Packet Length Max` |
 | 7 | Minimum forward packet length | `Fwd Packet Length Min` |
 | 14 | Flow throughput | `Flow Bytes/s` |
 
-Slot 0 is an identifier and is not used for learning. Slot 44 is excluded from the eight model columns because CICIDS2017 has no HTTP status equivalent; it is nevertheless read by the app-layer rule overrides and live feature monitor. The slot 3/5 mappings are explicitly approximate proxies, not exact feature equivalences. This matters when interpreting metrics and when connecting a real sensor.
+Slot 0 is an identifier and is not used for learning. Slot 3 (response count) is not a model input. Slot 44 is excluded from the model because CICIDS2017 has no HTTP status equivalent; it is read by Labrooms application rules only. The response-byte total is not the same as packet-level min/max lengths, so the slot-5 mappings remain proxies.
+
+For `packet-flow-v1`, backward packet-length max/min use actual packet statistic slots `[10]` and `[11]` rather than the Labrooms response-byte proxy at `[5]`.
 
 ### Preprocessing and validation
 
@@ -92,22 +95,22 @@ The `/concept-drift` status contract names ADWIN, Page-Hinkley, DDM-style pseudo
 
 | Method | What it tests in this project | Strength / why use it | Limitation in this project | Current live role |
 |---|---|---|---|---|
-| **ADWIN** | River ADWIN receives one attack-ratio value per prediction batch (`delta=0.002`). A second ADWIN on mean confidence uses `delta=0.01`. | Maintains an adaptive window rather than requiring one fixed window size; can react to changing numeric stream means with bounded online state. Useful for a streaming service where the baseline may change. | It only knows the signal supplied to it. On the live path, attack ratio/confidence are model outputs, not ground-truth error. Sensitivity depends on `delta`, batch size, and traffic pattern. | Attack-ratio ADWIN can trigger drift. Confidence ADWIN is warning-only. |
-| **Page-Hinkley** | River Page-Hinkley receives the same batch attack-ratio stream. | Cumulative-sum style change detector; complements ADWIN as a second sequential signal on the main live indicator. | Requires threshold/forgetting choices; it detects a change in the monitored statistic, not the cause or real label accuracy. | Can trigger drift, independently of ADWIN. |
+| **ADWIN** | River ADWIN receives one predicted-attack-ratio value per prediction batch (`delta=0.002`). A second ADWIN on mean confidence uses `delta=0.01`. | Maintains an adaptive window rather than requiring one fixed window size; can react to changing numeric stream means with bounded online state. Useful for a streaming service where the baseline may change. | It only knows the signal supplied to it. On the live path, predicted attack ratio/confidence are model outputs, not ground-truth error. Sensitivity depends on `delta`, batch size, and traffic pattern. | Predicted-attack-ratio ADWIN can trigger drift. Confidence ADWIN is warning-only. |
+| **Page-Hinkley** | River Page-Hinkley receives the same batch predicted-attack-ratio stream. | Cumulative-sum style change detector; complements ADWIN as a second sequential signal on the main live indicator. | Requires threshold/forgetting choices; it detects a change in the monitored statistic, not the cause or real label accuracy. | Can trigger drift, independently of ADWIN. |
 | **DDM-style error monitor** | A small custom implementation updates on rule-override flows only: error is 1 when the final rule label differs from the model's raw label, otherwise 0. Warning/drift thresholds follow `p + s` relative to its historical minimum. | Error-rate-based methods are conceptually useful when reliable online labels show whether predictions are wrong. | It is not River's built-in DDM class; live evidence is sparse and biased toward the handful of rule patterns. It has no ground-truth labels for ordinary traffic. | Status/warning telemetry only; it is not part of the live drift-event decision expression. |
 | **Kolmogorov–Smirnov (KS) test** | SciPy `ks_2samp` compares reference and recent raw values for slot 14 (`Flow Bytes/s`); it requires at least 10 samples in each group and reports a signal for `p < 0.05`. | Non-parametric two-sample test for a distribution difference; does not require class labels. | Tests feature-distribution shift, not a change in the feature-to-label relationship. A p-value is sensitive to sample size and is not a measure of operational impact. | Diagnostic status only; KS is not in the live event decision expression. |
 
 ### Additional feature-shift signal: PSI
 
-The monitor also computes Population Stability Index (PSI) for slots `[1, 4, 5, 14, 44]` using a reference set and a rolling recent set (default window 500). It uses 10 histogram bins, applies `log1p` to duration/byte/rate slots, and uses the raw value for slot 44. Scores under 0.10 are stable, 0.10–0.25 are a minor shift, and above 0.25 are marked drifted.
+The monitor also computes Population Stability Index (PSI) for shared duration/byte/rate slots `[1, 4, 5, 14]` using a reference set and a rolling recent set (default window 500). It uses 10 histogram bins and applies `log1p` to these values. HTTP status slot 44 and packet SYN-count slot 44 are excluded because they have different meanings. Scores under 0.10 are stable, 0.10–0.25 are a minor shift, and above 0.25 are marked drifted.
 
 The current event rule in `live_monitor.py` is:
 
 ```text
-ADWIN(attack_ratio) OR Page-Hinkley(attack_ratio) OR at least 2 PSI slots above 0.25
+ADWIN(predicted_attack_ratio) OR Page-Hinkley(predicted_attack_ratio) OR at least 2 PSI slots above 0.25
 ```
 
-A confidence warning, DDM signal, or KS signal alone does not create a drift event. PSI is not one of the four named `detector_algorithms` entries, but it is a genuine part of the event decision and the feature-shift table.
+A confidence warning, DDM signal, or KS signal alone does not create a drift event. The predicted attack ratio is calculated from model outputs, not ground truth. A drift alert therefore indicates a change in predictions or input-feature distribution; it does not prove classification error, an attack, or confirmed concept drift without independently verified labels. PSI is not one of the four named `detector_algorithms` entries, but it is a genuine part of the event decision and the feature-shift table.
 
 ### Which one is best?
 
@@ -140,21 +143,21 @@ Drift detection does not directly mutate the model. `LiveAdapter` collects eligi
 
 ### Pseudo-label selection
 
-The live stream has no general ground-truth label. The adapter and live evaluator resolve labels in this order:
+The live stream does not automatically have ground-truth labels. The adapter and evaluator accept labels in this order:
 
-1. `LBL::<CLASS_NAME>::...` in `flow_id` — simulator-provided ground truth.
-2. A deterministic app-layer rule override — treated as a label for the covered pattern.
-3. A `Normal Traffic` prediction with confidence at least 0.90 and no override.
-4. All remaining records are excluded from the adaptation/evaluation labels.
+1. `ground_truth_label` — supplied by an independently labeled, trusted source.
+2. `LBL::<CLASS_NAME>::...` in `flow_id` — simulator-provided ground truth.
+3. A deterministic app-layer rule override — a rule-derived label for the covered pattern.
+4. All remaining records are excluded; a model prediction is never recycled as training truth.
 
-This allows an automatic demo, but rule-derived labels cover only known rules and high-confidence Normal labels are self-generated. Live metrics therefore must be described as **pseudo-labeled metrics**, not as independent production accuracy.
+The Labrooms middleware supplied for this integration does not yet send `ground_truth_label`; real traffic is therefore learnable only when it matches a deterministic rule. These rule-derived labels cover known patterns, not arbitrary attacks. Metrics from simulator tags and rules are not the same as an independently labeled production test set.
 
 ### Buffer and eligibility
 
 - A ring buffer holds up to 5,000 labeled samples.
 - Auto retraining needs at least 200 labeled records, two distinct classes, and 30 non-Normal records.
 - Only one retrain may run at once. Automatic triggers have a 60-second cooldown; manual dashboard triggers bypass that cooldown but still obey the buffer and busy checks.
-- If the adapter consumes a drift event before the buffer is ready, it records a skipped event. The drift latch remains active until a later completed retrain resets the reference, or an administrator performs the demo reset. That is why the demo runbook primes non-Normal labels before expecting an automatic promotion.
+- If a drift event arrives before the buffer is ready, the adapter now retains it and waits for enough eligible labels. It starts one retrain when the buffer is ready and the automatic cooldown has elapsed. The pending event is persisted across restarts; the sample buffer itself is not, so after a restart new labels must refill it.
 
 ### Candidate training and promotion gates
 

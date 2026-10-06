@@ -155,18 +155,25 @@ Response:
 
 ## Feature Schema
 
-The model uses the **Labrooms deployment feature contract** (`labrooms-app-layer-v1`) — 8 features extracted from the 52-element sensor vector:
+The model uses eight named CICIDS2017 inputs with two accepted 52-slot sensor
+schemas. `labrooms-app-layer-v2` maps response-byte total at slot 5 to both
+backward packet-length inputs as a transaction proxy. `packet-flow-v1` uses
+actual backward packet-length max/min at slots 10 and 11. Both schemas map
+duration, forward packets/bytes/lengths, and throughput into the same named
+model inputs. HTTP-status rule overrides run only for the Labrooms schema.
 
 | Sensor Slot | CICIDS2017 Feature |
 |---|---|
 | [1] | Flow Duration |
 | [2] | Total Fwd Packets |
-| [3] | Bwd Packet Length Max *(proxy)* |
 | [4] | Total Length of Fwd Packets |
-| [5] | Bwd Packet Length Min *(proxy)* |
+| [5] | Bwd Packet Length Max and Min *(transaction response-byte proxy)* |
 | [6] | Fwd Packet Length Max |
 | [7] | Fwd Packet Length Min |
 | [14] | Flow Bytes/s |
+
+Slot [3] is the response count and is not used as a packet-length feature.
+Slot [44] is the HTTP status code used by rules, not by the classifier.
 
 See [`ml/src/features/feature_contract.py`](ml/src/features/feature_contract.py) for the full contract definition.
 

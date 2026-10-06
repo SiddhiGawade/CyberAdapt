@@ -69,7 +69,7 @@ matches — deviations must be listed in §D.
 - `ml/api.py` Brute-Force rule also fires on `status==404 AND bytes/s>100_000` — any generator emitting error statuses must rate-guard (T02's fix: small error bodies + duration floor).
 - Sensor script console output must be **ASCII-only** — Windows cp1252 crashes on `±`/`─`/`═`/emoji prints (T03 added `sys.stdout.reconfigure(errors="replace")`).
 - `attack_campaign.py`: `--scenario mixed` = 6 phases, `sensor_id=attack-campaign-<phase>`, all flows `LBL::<Class>::<desc>-<rand4>` tagged; **exfil tagged `Web_Attacks`** (no Exfiltration class); extra `--scale` flag scales phase durations. ~270 labeled attack samples per 45 s phase at `--rate 6`.
-- `normal_traffic.py`: 100% Normal @ conf ≥0.993 live-verified → every flow is a §5.4 `high_confidence` buffer label. ~2–3% of normal envelopes FP into "Brute Force" from the raw model — LBL tag is ground truth.
+- `normal_traffic.py`: use `--lbl-tag` so simulator-generated Normal flows carry explicit `LBL::Normal_Traffic::` ground truth. Model confidence is never accepted as a training label; real Labrooms flows need an independently verified label or a deterministic rule override.
 
 **Wave B merge (T08–T10, 2026-10-04):**
 - `ml/api.py` fully wired: `predict()` builds §9.1 `batch_records` → `_drift_monitor.process_batch()` → `_adapter.observe()` + `maybe_trigger()` → `_evaluator.record(records, latency_ms)`, all in one guarded try/except (~2.6 ms overhead).

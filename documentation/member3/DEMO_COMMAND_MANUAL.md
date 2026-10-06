@@ -127,7 +127,7 @@ After reset, expect version `v1`, an empty buffer, zero drift samples, and `stat
 In Terminal 5, run:
 
 ```powershell
-python sensor/normal_traffic.py --interval 2 --batch-size 8 --duration 140
+python sensor/normal_traffic.py --lbl-tag --interval 2 --batch-size 8 --duration 140
 ```
 
 Expect about 560 normal flows and successful `HTTP 202` responses.
@@ -140,7 +140,7 @@ python ml/scripts/check_drift_api.py once
 
 Proceed only when the monitor reports `status=active` and has seen at least 500 samples. On **Concept Drift**, the expected baseline is `active` and `stable`, with PSI near baseline. No drift during normal traffic is expected.
 
-On **Model Adaptation**, show the buffer filling with high-confidence Normal labels.
+On **Model Adaptation**, show the buffer filling with independently verified or simulator-tagged labels.
 
 ### Act 2 — DoS seed, drift detection, and automatic adaptation
 
@@ -218,7 +218,7 @@ Invoke-RestMethod http://127.0.0.1:5001/health
 python ml/scripts/check_adaptation_api.py reset
 
 # Act 1: normal baseline
-python sensor/normal_traffic.py --interval 2 --batch-size 8 --duration 140
+python sensor/normal_traffic.py --lbl-tag --interval 2 --batch-size 8 --duration 140
 
 # Confirm the monitor is active before injecting attacks
 python ml/scripts/check_drift_api.py once

@@ -90,6 +90,7 @@ from scapy.all import sniff, IP, TCP, UDP  # noqa: E402
 SENSOR_KEY     = os.environ.get("SENSOR_KEY", "")
 INGEST_URL     = os.environ.get("INGEST_URL", "")
 INTERFACE      = os.environ.get("INTERFACE", "eth0")
+CAPTURE_FILTER = os.environ.get("CAPTURE_FILTER", "ip")
 BATCH_INTERVAL = float(os.environ.get("BATCH_INTERVAL", "2"))
 BATCH_SIZE     = int(os.environ.get("BATCH_SIZE", "100"))
 SENSOR_ID      = os.environ.get("SENSOR_ID", f"sensor-{uuid.uuid4().hex[:8]}")
@@ -120,7 +121,7 @@ class FlowRecord:
     )
 
     def __init__(self, src_ip, src_port, dst_ip, dst_port, proto, ts):
-        self.flow_id = f"{src_ip}:{src_port}-{dst_ip}:{dst_port}-{proto}"
+        self.flow_id = uuid.uuid4().hex
         self.src_ip = src_ip
         self.src_port = src_port
         self.dst_ip = dst_ip
@@ -290,7 +291,7 @@ def flow_to_features(f: FlowRecord) -> list:
 
 # ─────────────────────── 5-Tuple Key ────────────────────────────────
 def _flow_key(pkt):
-    """Return a canonical bidirectional 5-tuple key + direction flag."""
+    """Return a canonical flow key and the packet's source/destination tuple."""
     if not pkt.haslayer(IP):
         return None, None
 
@@ -302,14 +303,10 @@ def _flow_key(pkt):
     elif pkt.haslayer(UDP):
         sport, dport = pkt[UDP].sport, pkt[UDP].dport
 
-    fwd = f"{ip.src}:{sport}-{ip.dst}:{dport}-{proto}"
-    bwd = f"{ip.dst}:{dport}-{ip.src}:{sport}-{proto}"
-
-    # Canonical ordering: smaller string is always the key
-    if fwd <= bwd:
-        return fwd, True   # forward
-    else:
-        return bwd, False  # backward (we matched the reverse)
+    source = (ip.src, sport)
+    destination = (ip.dst, dport)
+    endpoints = tuple(sorted((source, destination)))
+    return (*endpoints, proto), (ip.src, sport, ip.dst, dport, proto)
 
 
 # ─────────────────────── Sender Thread ───────────────────────────────
@@ -385,6 +382,7 @@ def main():
     log.info(" CyberAdapt Edge Sensor")
     log.info("  Sensor ID  : %s", SENSOR_ID)
     log.info("  Interface  : %s", INTERFACE)
+    log.info("  BPF filter : %s", CAPTURE_FILTER)
     log.info("  Ingest URL : %s", INGEST_URL)
     log.info("  Batch Size : %d / %ds", BATCH_SIZE, BATCH_INTERVAL)
     log.info("════════════════════════════════════════════════")
@@ -401,7 +399,11 @@ def main():
         nonlocal last_flush
         for key, flow in flow_table.items():
             features = flow_to_features(flow)
-            send_queue.put({"flow_id": flow.flow_id, "features": features})
+            send_queue.put({
+                "flow_id": flow.flow_id,
+                "feature_schema": "packet-flow-v1",
+                "features": features,
+            })
         count = len(flow_table)
         flow_table.clear()
         last_flush = time.time()
@@ -412,12 +414,13 @@ def main():
         """Callback for each sniffed packet."""
         nonlocal last_flush
 
-        key, is_forward = _flow_key(pkt)
+        key, packet_flow = _flow_key(pkt)
         if key is None:
             return
 
         ts = float(pkt.time)
         ip = pkt[IP]
+        src_ip, src_port, dst_ip, dst_port, proto = packet_flow
         pkt_len = len(pkt)
 
         # TCP header length & flags
@@ -431,16 +434,22 @@ def main():
             header_len = 8
 
         if key not in flow_table:
-            parts = key.split("-")
-            src_parts = parts[0].rsplit(":", 1)
-            dst_parts = parts[1].rsplit(":", 1)
             flow_table[key] = FlowRecord(
-                src_ip=src_parts[0],
-                src_port=int(src_parts[1]),
-                dst_ip=dst_parts[0],
-                dst_port=int(dst_parts[1]),
-                proto=int(parts[2]),
+                src_ip=src_ip,
+                src_port=src_port,
+                dst_ip=dst_ip,
+                dst_port=dst_port,
+                proto=proto,
                 ts=ts,
+            )
+            is_forward = True
+        else:
+            flow = flow_table[key]
+            is_forward = (
+                src_ip == flow.src_ip
+                and src_port == flow.src_port
+                and dst_ip == flow.dst_ip
+                and dst_port == flow.dst_port
             )
 
         flow_table[key].add_packet(pkt_len, header_len, flags, is_forward, ts)
@@ -452,12 +461,16 @@ def main():
     log.info("Starting packet capture on %s…", INTERFACE)
 
     try:
-        sniff(
-            iface=INTERFACE,
-            filter="ip",
-            prn=process_packet,
-            store=False,
-        )
+        while True:
+            sniff(
+                iface=INTERFACE,
+                filter=CAPTURE_FILTER,
+                prn=process_packet,
+                store=False,
+                timeout=BATCH_INTERVAL,
+            )
+            if flow_table and (time.time() - last_flush) >= BATCH_INTERVAL:
+                flush_flows()
     except KeyboardInterrupt:
         log.info("Shutting down…")
         flush_flows()

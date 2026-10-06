@@ -5,12 +5,11 @@ Implements the frozen §9.4 interface (`LiveEvaluator`) for the CyberAdapt
 member-3 live-evaluation pipeline. The champion model is scored against the
 same pseudo-labels that feed adaptation (master plan §5.4):
 
-    1. ``LBL::<CLASS_NAME>::`` flow_id tag (underscores -> spaces, class name
-       must match ``TARGET_CLASSES``)
-    2. rule-override label (``_detect_labrooms_app_layer_anomaly`` fired)
-    3. high-confidence ``Normal Traffic`` prediction (confidence >= 0.90,
-       no rule fired)
-    4. everything else is excluded — unlabeled flows are never recorded
+    1. explicit ``ground_truth_label`` from an independently labeled source
+    2. ``LBL::<CLASS_NAME>::`` simulator tag
+    3. deterministic application-rule override
+    4. everything else is excluded — model predictions are never treated as
+       ground truth
 
 ``get_metrics()`` returns the exact §8 ``GET /evaluation`` contract, including
 a pre/post-adaptation split driven by the last ``promoted: true`` timestamp in
@@ -50,14 +49,12 @@ logger = logging.getLogger(__name__)
 
 # --- Constants (locked by master plan §5.4 / §8) ----------------------------
 LBL_PREFIX = "LBL::"
-HIGH_CONF_NORMAL_THRESHOLD = 0.90
 MIN_LABELED_SAMPLES = 30          # below this -> "insufficient_data": true
 LATENCY_DEQUE_MAXLEN = 500
 DEFAULT_MODEL_VERSION = "v1"      # original champion before any promotion
-DATASET_LABEL = "Live Labrooms stream (pseudo-labeled)"
+DATASET_LABEL = "Live Labrooms stream (verified/rule-labeled)"
 _EVAL_WINDOW_FILENAME = "eval_window.jsonl"
 _ADAPTATION_HISTORY_FILENAME = "adaptation_history.json"
-_NORMAL_INDEX = TARGET_CLASSES.index("Normal Traffic")  # 0
 _NUM_CLASSES = len(TARGET_CLASSES)
 
 
@@ -79,7 +76,12 @@ def _resolve_pseudo_label(record: Dict[str, Any]) -> Optional[int]:
     Returns the TARGET_CLASSES index to treat as ground truth, or None when
     the flow carries no usable label (such flows are NOT recorded).
     """
-    # 1. LBL::<CLASS_NAME>:: flow_id simulator ground-truth tag.
+    # 1. Explicit label from an independently labeled, trusted source.
+    label = record.get("ground_truth_label")
+    if label in TARGET_CLASSES:
+        return TARGET_CLASSES.index(label)
+
+    # 2. LBL::<CLASS_NAME>:: flow_id simulator ground-truth tag.
     flow_id = str(record.get("flow_id") or "")
     if flow_id.startswith(LBL_PREFIX):
         parts = flow_id.split("::")
@@ -87,9 +89,9 @@ def _resolve_pseudo_label(record: Dict[str, Any]) -> Optional[int]:
             class_name = parts[1].replace("_", " ")
             if class_name in TARGET_CLASSES:
                 return TARGET_CLASSES.index(class_name)
-        # malformed tag -> keep trying the other sources
+        return None
 
-    # 2. Rule-override label (ground-truth quality for the 4 attack patterns).
+    # 3. Rule-override label for the deterministic patterns.
     if record.get("rule_override"):
         idx = _safe_index(record.get("label_index"))
         if idx is not None:
@@ -99,19 +101,7 @@ def _resolve_pseudo_label(record: Dict[str, Any]) -> Optional[int]:
             return TARGET_CLASSES.index(label)
         # unresolvable override label -> keep trying
 
-    # 3. High-confidence Normal (model predicted Normal, conf >= 0.90,
-    #    no rule fired — when no rule fired final label == model_raw_label).
-    if not record.get("rule_override"):
-        is_normal = (
-            record.get("label") == "Normal Traffic"
-            or _safe_index(record.get("label_index")) == _NORMAL_INDEX
-        )
-        if is_normal:
-            conf = _as_float(record.get("confidence"))
-            if conf is not None and conf >= HIGH_CONF_NORMAL_THRESHOLD:
-                return _NORMAL_INDEX
-
-    # 4. Everything else -> excluded (unlabeled).
+    # Everything else is excluded; never score against the model's own guess.
     return None
 
 

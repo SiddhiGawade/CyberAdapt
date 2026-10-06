@@ -7,19 +7,21 @@ GET /concept-drift renders get_status() verbatim (the §8 contract — field
 names are law, the UI builds against them).
 
 Signals per batch / per flow:
-  1. attack_ratio (fraction of batch labelled non-Normal, post rule-override)
+  1. predicted_attack_ratio (fraction of predictions not Normal)
        -> ADWIN(delta=0.002) AND PageHinkley. Batch-level, not per-flow: a
        binary burst would double-fire on a per-flow stream.
   2. mean_confidence -> ADWIN(delta=0.01). Warning-only, never fires drift.
   3. pseudo_error (per rule-override flow: 1 when final label != model's raw
        label) -> DDM-style running error-rate. Batches with zero overrides
        skip the update — no evidence to learn from.
-  4. Per-slot PSI on slots [1, 4, 5, 14, 44]: reference = first `window`
-       flows since reset, recent = rolling last `window` (10-bin histogram,
-       log1p on byte/duration slots, raw on the HTTP-status slot).
+  4. Per-slot PSI on common flow slots [1, 4, 5, 14]: reference = first
+       `window` flows since reset, recent = rolling last `window` (10-bin
+       histogram with log1p on byte/duration/throughput values).
   5. KS test on slot-14 raw values (reference vs recent deques).
 
-Drift decision (§5.3): ADWIN(attack_ratio) OR PageHinkley OR >=2 slots drifted.
+Drift decision (§5.3): ADWIN/PageHinkley on predicted-class ratio OR >=2
+common feature slots drifted. This is unlabeled drift evidence, not proof of
+prediction error or confirmed concept drift.
 On drift: one event (cap 20, newest first), the fired detectors are reset,
 reference histograms rotate to the recent window, and the event waits for the
 adapter via consume_drift_event().
@@ -54,15 +56,14 @@ logger = logging.getLogger(__name__)
 # --- Frozen contract constants ------------------------------------------------
 
 NORMAL_LABEL = "Normal Traffic"
-PSI_SLOTS = (1, 4, 5, 14, 44)
+PSI_SLOTS = (1, 4, 5, 14)
 SLOT_NAMES = {
     1: "Flow Duration",
     4: "Total Fwd Bytes",
     5: "Total Bwd Bytes",
     14: "Flow Bytes/s",
-    44: "HTTP Status Code",
 }
-LOG1P_SLOTS = (1, 4, 5, 14)  # slot 44 (HTTP status) is binned raw
+LOG1P_SLOTS = (1, 4, 5, 14)
 
 PSI_BINS = 10
 PSI_EPS = 1e-4
@@ -183,7 +184,7 @@ class LiveDriftMonitor:
                             self._ref[slot].append(v)
                         self._recent[slot].append(v)
 
-            attack_ratio = attack_count / batch_size
+            predicted_attack_ratio = attack_count / batch_size
             mean_confidence = (confidence_sum / confidence_count) if confidence_count else 0.0
 
             self.samples_processed += batch_size
@@ -191,9 +192,9 @@ class LiveDriftMonitor:
             self.batches_processed += 1
 
             # --- Detector updates -------------------------------------------
-            adwin_drift, adwin_width, adwin_est = self._attack_adwin.update(attack_ratio)
+            adwin_drift, adwin_width, adwin_est = self._attack_adwin.update(predicted_attack_ratio)
             conf_drift, _, _ = self._confidence_adwin.update(mean_confidence)
-            self._ph.update(attack_ratio)
+            self._ph.update(predicted_attack_ratio)
             ph_drift = bool(self._ph.drift_detected)
             self._last_adwin_signal = bool(adwin_drift)
             self._last_ph_signal = ph_drift
@@ -219,7 +220,7 @@ class LiveDriftMonitor:
                     adwin_drift=adwin_drift,
                     ph_drift=ph_drift,
                     slots_drifted=slots_drifted,
-                    attack_ratio=attack_ratio,
+                    attack_ratio=predicted_attack_ratio,
                     adwin_est=adwin_est,
                     adwin_width=adwin_width,
                 )
@@ -229,7 +230,8 @@ class LiveDriftMonitor:
 
             return {
                 "batch_size": batch_size,
-                "attack_ratio": round(attack_ratio, 4),
+                "attack_ratio": round(predicted_attack_ratio, 4),
+                "predicted_attack_ratio": round(predicted_attack_ratio, 4),
                 "mean_confidence": round(mean_confidence, 4),
                 "drift_detected": event is not None,
                 "drift_state": self._drift_state(),
@@ -266,6 +268,8 @@ class LiveDriftMonitor:
                 "samples_processed_since_retrain": self.samples_since_reset,
                 "last_drift_timestamp": self.last_drift_timestamp,
                 "attack_ratio_recent": round(self._recent_attack_ratio(), 4),
+                "predicted_attack_ratio_recent": round(self._recent_attack_ratio(), 4),
+                "drift_basis": "Predicted-class ratio and input-feature distribution; ground-truth labels are not inferred.",
                 "detector_algorithms": {
                     "ADWIN_attack_ratio": {
                         "status": "drift" if self._last_adwin_signal else "stable",

@@ -47,9 +47,9 @@ EXPECTED_KEYS = {
     "adaptation_in_progress", "online_learning_buffer", "retraining_history",
     "last_event",
 }
-EXPECTED_LABEL_SOURCES = {"rule_override", "high_confidence", "flow_id_tag"}
+EXPECTED_LABEL_SOURCES = {"verified_label", "rule_override", "flow_id_tag"}
 EXPECTED_GATES = {"gate_macro_f1", "gate_bal_acc", "gate_emerged_recall", "gate_normal_fpr"}
-EXPECTED_EVENT_TYPES = {"promotion", "rejection", "skipped", "error"}
+EXPECTED_EVENT_TYPES = {"promotion", "rejection", "waiting", "skipped", "error"}
 EXPECTED_HIST_KEYS = {"version", "timestamp", "f1_score", "trigger", "promoted", "gates_passed"}
 EXPECTED_EVENT_KEYS = {"type", "timestamp", "detail"}
 
@@ -107,7 +107,7 @@ def short() -> str:
     return (
         f"version={a.get('champion_version')} in_progress={a.get('adaptation_in_progress')} "
         f"buffer={buf.get('current_size')}/{buf.get('capacity')} ({buf.get('fill_percentage')}%) "
-        f"labels=[ro:{ls.get('rule_override')} hc:{ls.get('high_confidence')} "
+        f"labels=[verified:{ls.get('verified_label')} ro:{ls.get('rule_override')} "
         f"tag:{ls.get('flow_id_tag')}] hist={len(hist)} "
         f"last_event={le.get('type')}: {str(le.get('detail'))[:110]} | {drift}"
     )

@@ -46,9 +46,9 @@ same contract as `build_labrooms_flow`):
 - `sensor_id = "normal-traffic-gen"`. Print one line per batch like mock_sensor.
 - `requests` + stdlib only, no new deps. KeyboardInterrupt → print summary, exit 0.
 - Keep it under ~250 lines; docstring header in the existing sensor style.
-- Optional `--lbl-tag` to prefix `LBL::Normal_Traffic::` on flow_ids (default
-  off for normal traffic — the §5.4 high-confidence rule already labels it;
-  having the flag aids experiments).
+- Optional `--lbl-tag` to prefix `LBL::Normal_Traffic::` on flow_ids. Enable it
+  when the generator is used to seed the adaptation buffer; model predictions
+  are not accepted as training labels.
 
 **Acceptance bar:** flows must be labeled `Normal Traffic` by the live
 pipeline with zero rule overrides — verify, don't assume.

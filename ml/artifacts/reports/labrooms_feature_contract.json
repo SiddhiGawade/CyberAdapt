@@ -1,5 +1,5 @@
 {
-  "schema_version": "labrooms-app-layer-v1",
+  "schema_version": "labrooms-app-layer-v2",
   "target_column": "Attack Type",
   "target_classes": [
     "Normal Traffic",
@@ -36,12 +36,13 @@
     "Total Length of Fwd Packets": "Labrooms slot [4] \u2014 size of the incoming HTTP request (bytes)",
     "Fwd Packet Length Max": "Labrooms slot [6] \u2014 same as Total Fwd Bytes (request size)",
     "Fwd Packet Length Min": "Labrooms slot [7] \u2014 same as Total Fwd Bytes (request size)",
-    "Bwd Packet Length Max": "Labrooms slot [3] proxy \u2014 Total Bwd Packets (CICIDS2017 proxy)",
-    "Bwd Packet Length Min": "Labrooms slot [5] proxy \u2014 Total Bwd Bytes / response size (CICIDS2017 proxy)",
+    "Bwd Packet Length Max": "Labrooms slot [5] \u2014 total HTTP response bytes used as a packet-length proxy",
+    "Bwd Packet Length Min": "Labrooms slot [5] \u2014 same response-byte proxy; Labrooms reports one response flow",
     "Flow Bytes/s": "Labrooms slot [14] \u2014 (request + response bytes) / duration"
   },
   "omitted_labrooms_slots": {
     "[0] Flow ID Hash": "Omitted \u2014 numeric identifier, not a learnable ML feature",
+    "[3] Total Bwd Packets": "Omitted \u2014 response count is not a backward packet-length measurement",
     "[44] HTTP Status Code": "Omitted \u2014 no equivalent in CICIDS2017; use if future dataset provides it"
   },
   "zeroed_feature_groups": "The following CICIDS2017 feature groups are always zero in Labrooms deployments and MUST NOT be used during training to avoid training-serving skew: Packet-level length stats (Fwd/Bwd Mean/Std), Inter-Arrival Times (IAT), TCP Flags (FIN/RST/PSH/ACK/URG/SYN), Header Lengths, Global Packet Stats, Window sizes, Subflow stats, Active/Idle stats.",

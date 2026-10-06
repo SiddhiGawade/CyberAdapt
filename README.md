@@ -1,5 +1,10 @@
 # CyberAdapt — Adaptive Cyber Threat Intelligence under Concept Drift
 
+For a one-command local packet-capture lab on Windows, see
+[RUN_CYBERADAPT.md](./RUN_CYBERADAPT.md). Its Docker Compose launcher captures
+traffic in a shared Linux container network namespace and does not require
+Npcap on the Windows host.
+
 > Advanced Machine Learning (AML) Mini-Project — VIT, 3rd Year B.Tech (7th Semester)
 
 CyberAdapt is a SaaS-style threat-intelligence platform. Edge sensors capture
@@ -108,9 +113,12 @@ written back onto the stored `TelemetryLog` documents → dashboard polls
 - **Rolling pseudo-labeled evaluation** — `GET /evaluation` computes live
   metrics over a rolling labeled window: accuracy, per-class metrics,
   confusion matrix, and a pre/post-adaptation comparison at the last promotion.
-- **Feature contract** — `labrooms-app-layer-v1`: only 8 populated slots of the
-  52-feature vector are used (slots 1,2,3,4,5,6,7,14 → duration, packet counts,
-  byte counts, bytes/s). Documented in `ml/artifacts/reports/labrooms_feature_contract.json`.
+- **Feature contract** — `labrooms-app-layer-v2`: eight named model inputs are
+  selected from the 52-slot vector. The Labrooms response-byte total at slot 5
+  supplies both backward packet-length proxy columns; slot 3 (response count)
+  and slot 44 (HTTP status) are not model inputs. Status and response size are
+  also used by deterministic rules. Documented in
+  `ml/artifacts/reports/labrooms_feature_contract.json`.
 - **Dashboard (7 pages)** — dark cyber theme, JWT-protected routes:
   | Page | Route | Shows |
   |---|---|---|
@@ -276,11 +284,11 @@ pip install requests
 python sensor/mock_sensor.py --key "ca_live_YOUR_KEY" --url http://localhost:5000/api/telemetry/ingest
 ```
 
-**Attack demo (best for screenshots — produces visible threat labels):**
+**Synthetic attack-vector demo (not packet capture):**
 
 ```bash
 python sensor/simulate_attacks.py --key "ca_live_YOUR_KEY"
-# sends 4 attacks + 1 normal flow, then prints the ML predictions
+# sends five hand-built feature vectors, then prints predictions
 ```
 
 **Normal traffic generator (baseline for the drift demo):**
@@ -290,32 +298,70 @@ python sensor/normal_traffic.py --key "ca_live_YOUR_KEY" --interval 2 --batch-si
 # streams plausible normal flows; ~500 flows warms the drift monitor to `active`
 ```
 
-**Attack campaign (multi-phase labeled attacks — drives live drift + adaptation):**
+**Attack campaign (labeled synthetic vectors — adaptation-gate test only):**
 
 ```bash
 python sensor/attack_campaign.py --key "ca_live_YOUR_KEY" --scenario mixed --rate 12 --batch-size 6
-# 6-phase campaign (warmup/dos/bruteforce/sqli/exfil/cooldown), LBL-tagged flows
+# 6-phase synthetic campaign; LBL tags are simulator ground truth, not predictions
 ```
 
-**Real packet capture (needs libpcap/Npcap + admin):**
+**Local packet-capture test (actual loopback packets, no injected labels):**
 
-```bash
-pip install scapy requests
-set SENSOR_KEY=ca_live_YOUR_KEY
-set INGEST_URL=http://localhost:5000/api/telemetry/ingest
-set INTERFACE=eth0            # your interface name
+On Windows, the whole local test can be started with
+[`Start-CyberAdapt-Lab.ps1`](./Start-CyberAdapt-Lab.ps1); see
+[`RUN_CYBERADAPT.md`](./RUN_CYBERADAPT.md) for prerequisites and options.
+
+The HTTP target binds only to `127.0.0.1:5055`. Its auth route rejects fake
+test credentials (there are no real user accounts); the other attack-signal
+routes return canned 504 and 500 responses. They do not perform an exploit or
+a real denial of service. Unlike the synthetic-vector demos above, this test runs the
+Scapy sensor on the Npcap loopback adapter. It captures the packets created by
+the HTTP requests, computes packet-flow features, and sends them unlabeled
+through the normal CyberAdapt ingest and inference path. The `packet-flow-v1`
+mapping keeps TCP SYN counts distinct from HTTP status codes.
+
+Start the target:
+
+```powershell
+node server/scripts/cyberadapt-test-target.js
+```
+
+In an elevated PowerShell, run the sensor. Install Npcap with loopback capture
+enabled and install the sensor Python packages with
+`python -m pip install scapy requests`. Use its loopback interface name
+(commonly `\Device\NPF_Loopback`):
+
+```powershell
+$env:SENSOR_KEY = "ca_live_YOUR_KEY"
+$env:INGEST_URL = "http://127.0.0.1:5000/api/telemetry/ingest"
+$env:INTERFACE = "\Device\NPF_Loopback"
+$env:CAPTURE_FILTER = "ip and host 127.0.0.1 and port 5055"
 python sensor/sensor.py
 ```
 
-…or via Docker: `docker build -t cyberadapt-sensor sensor/ && docker run --net=host -e SENSOR_KEY=… -e INGEST_URL=… cyberadapt-sensor`
+Then send requests to that target:
+
+```powershell
+node server/scripts/cyberadapt-test-driver.js
+# Optional longer baseline and distribution-shift exercise:
+node server/scripts/cyberadapt-test-driver.js --normal-count 500 --attack-count 50
+```
+
+This is real loopback packet capture and real HTTP traffic, but not a real
+exploit or destructive attack. Confirm batch delivery in the sensor logs and
+view model predictions in Live Traffic. No ground-truth labels are sent, so
+the run cannot establish classification accuracy or supply trusted labels for
+supervised retraining. Drift only indicates a change in model predictions or
+feature distribution; independent labels are needed to confirm concept drift.
+Stop the local sensor and target with `Ctrl+C`.
 
 ### 6. View it
 
 Open `http://localhost:3000` → log in with the seed credentials →
 watch **Live Traffic** populate with flows and ML threat labels; check
 **Overview**, **Concept Drift**, **Adaptation**, **Explainability**,
-**Evaluation** in the sidebar. After running `simulate_attacks.py` you'll see
-DoS / Brute Force / Web Attacks labels appear within a couple of seconds.
+**Evaluation** in the sidebar. Labels on packet-capture flows are model
+predictions, not labels injected by the local test server.
 
 ---
 

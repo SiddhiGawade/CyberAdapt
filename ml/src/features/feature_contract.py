@@ -4,7 +4,7 @@ Feature Contract Specification for Adaptive Cyber Threat Intelligence.
 Defines canonical feature lists, target label schemas, questionable feature evaluation,
 negative Flow Duration handling, and JSON contract generation for both offline benchmark
 (cicids2017-flow-v1), production deployment (production-flow-v1), and Labrooms deployment
-(labrooms-app-layer-v1).
+(labrooms-app-layer-v2).
 
 Labrooms Deployment Note:
   The Labrooms sensor sends a 52-element feature array (based on the CyberAdapt spec) where
@@ -16,17 +16,18 @@ Labrooms Deployment Note:
   Labrooms → CICIDS2017 semantic mapping (non-zero slots only):
     [1]  Flow Duration         → 'Flow Duration'
     [2]  Total Fwd Packets     → 'Total Fwd Packets'
-    [3]  Total Bwd Packets*    → 'Bwd Packet Length Max'  (closest CICIDS2017 proxy)
     [4]  Total Fwd Bytes       → 'Total Length of Fwd Packets'
-    [5]  Total Bwd Bytes*      → 'Bwd Packet Length Min'  (closest CICIDS2017 proxy)
+    [5]  Total Bwd Bytes       → 'Bwd Packet Length Max' and 'Bwd Packet Length Min'
     [6]  Fwd Pkt Len Max       → 'Fwd Packet Length Max'
     [7]  Fwd Pkt Len Min       → 'Fwd Packet Length Min'
     [14] Flow Bytes/s          → 'Flow Bytes/s'
     [44] HTTP Status Code**    → omitted (no CICIDS2017 equivalent)
     [0]  Flow ID Hash          → omitted (identifier, not a ML feature)
 
-  * CICIDS2017 does not have "Total Bwd Packets" or "Total Bwd Bytes" as named columns;
-    Bwd Packet Length Max/Min are used as the closest available proxies.
+  * The Labrooms sensor reports transaction-level response bytes and a response
+    count of one, not per-packet backward length statistics. The response-byte
+    total is therefore used as a proxy for both backward packet-length columns;
+    slot [3] is not used as a packet-length value.
   ** CICIDS2017 does not contain HTTP status codes, so the SYN-Count/Status-Code slot
      has no equivalent and is omitted from training.
 """
@@ -54,7 +55,7 @@ TARGET_CLASSES: List[str] = [
 
 SCHEMA_VERSION: str = "cicids2017-flow-v1"
 PRODUCTION_SCHEMA_VERSION: str = "production-candidate-flow-v1"
-LABROOMS_SCHEMA_VERSION: str = "labrooms-app-layer-v1"
+LABROOMS_SCHEMA_VERSION: str = "labrooms-app-layer-v2"
 
 # All 52 numeric feature columns available in cleaned CSV dataset (excluding target column)
 ALL_AVAILABLE_FEATURES: List[str] = [
@@ -130,20 +131,17 @@ PRODUCTION_FLOW_V1_FEATURES: List[str] = [
 ]
 
 # ---------------------------------------------------------------------------
-# Labrooms Deployment Feature Contract  (labrooms-app-layer-v1)
+# Labrooms Deployment Feature Contract  (labrooms-app-layer-v2)
 # ---------------------------------------------------------------------------
-# The Labrooms sensor sends a 52-slot CyberAdapt array where only the 10
-# indices below are ever populated. The remaining 42 slots are always zero.
-# Training on zero-valued features would cause training-serving skew, so we
-# restrict the model to only these 8 CICIDS2017 columns that semantically
-# correspond to the non-zero (and non-identifier) Labrooms slots.
+# The Labrooms sensor sends a 52-slot CyberAdapt array where 10 indices are
+# populated. The model selects eight CICIDS2017 columns from the compatible
+# measurements; response bytes supply both backward packet-length proxies.
 #
 # Slot → Labrooms meaning → CICIDS2017 column used
 #  [1]  Flow Duration          → Flow Duration
 #  [2]  Total Fwd Packets      → Total Fwd Packets
-#  [3]  Total Bwd Packets*     → Bwd Packet Length Max  (closest proxy)
-#  [4]  Total Fwd Bytes        → Total Length of Fwd Packets
-#  [5]  Total Bwd Bytes*       → Bwd Packet Length Min  (closest proxy)
+#  [4]  Total Fwd Bytes       → Total Length of Fwd Packets
+#  [5]  Total Bwd Bytes       → Bwd Packet Length Max and Min (transaction-level proxy)
 #  [6]  Fwd Pkt Len Max        → Fwd Packet Length Max
 #  [7]  Fwd Pkt Len Min        → Fwd Packet Length Min
 #  [14] Flow Bytes/s           → Flow Bytes/s
@@ -157,8 +155,8 @@ LABROOMS_DEPLOYMENT_FEATURES: List[str] = [
     "Total Length of Fwd Packets", # Labrooms slot [4] — Total Fwd Bytes (request size)
     "Fwd Packet Length Max",       # Labrooms slot [6] — Fwd Pkt Len Max
     "Fwd Packet Length Min",       # Labrooms slot [7] — Fwd Pkt Len Min
-    "Bwd Packet Length Max",       # Labrooms slot [3] proxy — Total Bwd Packets
-    "Bwd Packet Length Min",       # Labrooms slot [5] proxy — Total Bwd Bytes
+    "Bwd Packet Length Max",       # Labrooms slot [5] — response bytes proxy
+    "Bwd Packet Length Min",       # Labrooms slot [5] — same single-response proxy
     "Flow Bytes/s",                # Labrooms slot [14] — Throughput
 ]
 
@@ -288,11 +286,9 @@ def export_labrooms_feature_contract(
 ) -> Dict[str, Any]:
     """Generate and write labrooms_feature_contract.json for Labrooms deployment.
 
-    This contract encodes only the 8 CICIDS2017 features that semantically
-    correspond to the non-zero, non-identifier slots of the Labrooms 52-element
-    CyberAdapt sensor array.  Training on the full 52-feature set against
-    Labrooms traffic would introduce severe training-serving skew because the
-    other 44 features are always 0 in production.
+    This contract selects eight CICIDS2017 feature columns from the Labrooms
+    52-element sensor array. Slot 5 is a response-byte proxy for both backward
+    packet-length columns; slot 3 is not used as a packet-length measurement.
     """
     contract = {
         "schema_version": schema_version,
@@ -315,12 +311,13 @@ def export_labrooms_feature_contract(
             "Total Length of Fwd Packets": "Labrooms slot [4] — size of the incoming HTTP request (bytes)",
             "Fwd Packet Length Max": "Labrooms slot [6] — same as Total Fwd Bytes (request size)",
             "Fwd Packet Length Min": "Labrooms slot [7] — same as Total Fwd Bytes (request size)",
-            "Bwd Packet Length Max": "Labrooms slot [3] proxy — Total Bwd Packets (CICIDS2017 proxy)",
-            "Bwd Packet Length Min": "Labrooms slot [5] proxy — Total Bwd Bytes / response size (CICIDS2017 proxy)",
+            "Bwd Packet Length Max": "Labrooms slot [5] — total HTTP response bytes used as a packet-length proxy",
+            "Bwd Packet Length Min": "Labrooms slot [5] — same response-byte proxy; Labrooms reports one response flow",
             "Flow Bytes/s": "Labrooms slot [14] — (request + response bytes) / duration",
         },
         "omitted_labrooms_slots": {
             "[0] Flow ID Hash": "Omitted — numeric identifier, not a learnable ML feature",
+            "[3] Total Bwd Packets": "Omitted — response count is not a backward packet-length measurement",
             "[44] HTTP Status Code": "Omitted — no equivalent in CICIDS2017; use if future dataset provides it",
         },
         "zeroed_feature_groups": LABROOMS_ZEROED_FEATURES_NOTE,

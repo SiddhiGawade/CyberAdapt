@@ -1,0 +1,14 @@
+.git
+.venv
+**/node_modules
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+ml/data
+ml/notebooks
+ml/.ipynb_checkpoints
+documentation
+docker-reports
+*.log

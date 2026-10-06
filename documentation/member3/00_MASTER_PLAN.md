@@ -359,7 +359,7 @@ parallelize over separate docs.
   "adaptation_in_progress": false,
   "online_learning_buffer": {
     "capacity": 5000, "current_size": 1420, "fill_percentage": 28.4,
-    "label_sources": {"rule_override": 320, "high_confidence": 1090, "flow_id_tag": 10}
+    "label_sources": {"verified_label": 20, "rule_override": 320, "flow_id_tag": 1060}
   },
   "retraining_history": [
     {"version": "v2", "timestamp": "...", "f1_score": 0.984,
