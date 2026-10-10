@@ -42,6 +42,29 @@ The scanner applies active tests after spidering; a timeout can stop it before
 the HTML/JSON report is complete. Captured traffic already sent to CyberAdapt
 is retained, and the launcher reports whether ML inference processed it.
 
+## Run the bounded local load test
+
+The Juice Shop/ZAP security scan and this load test are separate. Keep the
+Docker lab running, open a second PowerShell window in the repository root,
+and run:
+
+```powershell
+docker compose run --build --rm --no-deps load-test --requests 200 --concurrency 4 --rate 5 --duration-seconds 60
+```
+
+This sends at most 200 plain homepage requests to local Juice Shop, up to four
+at once, with a maximum rate of five per second and a one-minute limit. The
+script hard-restricts the target to the local lab, sends no exploit payloads,
+and does not send labels to the model. It prints the inference sample count,
+model-derived attack ratio, and drift state before and after the test. This is
+a controlled DoS-like load test from one machine—not a DDoS attack—and it
+cannot guarantee an attack prediction.
+
+You can lower the request count or rate, but the script rejects values above
+its safety limits (5,000 requested requests, five concurrent requests, ten requests per
+second, and 60 seconds). Previous ZAP scans and reports are separate and are
+not overwritten by this test.
+
 To inspect the stack manually:
 
 ```powershell

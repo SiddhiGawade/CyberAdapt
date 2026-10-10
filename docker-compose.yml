@@ -140,6 +140,22 @@ services:
     profiles:
       - tools
 
+  load-test:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    entrypoint: ["node", "scripts/cyberadapt-local-load-test.js"]
+    environment:
+      CYBERADAPT_TARGET_URL: http://target:3000
+      CYBERADAPT_ML_STATUS_URL: http://ml-api:5001/concept-drift
+    depends_on:
+      target:
+        condition: service_healthy
+      ml-api:
+        condition: service_healthy
+    profiles:
+      - tools
+
 volumes:
   mongodb_data:
   ml_state:
