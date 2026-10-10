@@ -32,6 +32,35 @@ predictions. Model predictions are generated from captured packet features;
 the scanner does not send labels to the model. Scan reports are written to
 `docker-reports\zap-report.html` and `docker-reports\zap-report.json`.
 
+## Test drift with synthetic features
+
+To test drift independently of packet capture, keep the Docker services running
+and open a second PowerShell window in the repository root. Pause the packet
+sensor so it cannot add traffic to the test baseline, then generate a sensor
+key and run the dedicated drift test:
+
+```powershell
+docker compose stop sensor
+docker compose --profile tools run --rm seed
+python sensor/test_drift_injection.py --reset
+```
+
+Paste the newly printed `ca_live_...` key when prompted. The script sends 500
+unlabeled baseline feature vectors followed by 500 synthetic short-duration,
+high-forward-byte vectors through the normal backend ingest and ML inference
+path. It waits for each batch to reach inference and reports the live PSI
+values and drift event. `--reset` clears the ML demo's drift, adaptation, and
+evaluation state so the test starts with a clean baseline; it does not delete
+stored telemetry. The vectors are synthetic and do not represent real packets
+or prove attack classification. No trusted labels are supplied, so this test
+does not request model retraining.
+
+Restart live packet capture afterwards if needed:
+
+```powershell
+docker compose start sensor
+```
+
 Optional: adjust the active scan's hard timeout (1–5 minutes):
 
 ```powershell
